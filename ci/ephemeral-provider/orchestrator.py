@@ -1631,115 +1631,83 @@ class EphemeralEnvOrchestrator:
         TODO: drop once ZOA discovery no longer needs a central entry.
         """
         script = git.work_dir / "scripts" / "publish-zoa-discovery.sh"
-        env = os.environ.copy()
-        env.update(self.aws.subprocess_env)
+        delete_flag = ["--delete"] if delete else []
         subprocess.run(
-            ["/bin/bash", str(script), *(["--delete"] if delete else []), TARGET_ENVIRONMENT, self.region],
+            ["/bin/bash", str(script), *delete_flag, TARGET_ENVIRONMENT, self.region],
             cwd=git.work_dir,
-            env=env,
+            env={**os.environ, **self.aws.subprocess_env},
             stdout=sys.stdout,
             stderr=sys.stderr,
             check=True,
             timeout=300,
         )
 
-    @staticmethod
-    def _terraform_init(work_dir: Path, env: dict[str, str], bucket: str, key: str, region: str):
-        subprocess.run(
-            [
-                "terraform",
-                "init",
-                "-reconfigure",
-                f"-backend-config=bucket={bucket}",
-                f"-backend-config=key={key}",
-                f"-backend-config=region={region}",
-                "-backend-config=use_lockfile=true",
-            ],
-            cwd=work_dir,
-            env=env,
-            check=True,
-            timeout=TEARDOWN_TIMEOUT,
-        )
-
     def _destroy_provisioner(self, git: GitManager):
-        """Destroy the region bootstrap: the central delegation, then the RC root.
+        """Destroy the region bootstrap.
 
-        Removes the connection from the RC state first so it persists across CI
-        runs. Destroy may run from a fresh checkout, so the required variables
-        are written from the rendered config.
+        The central root (zone delegation) goes first, then the RC root
+        (pipeline infrastructure and regional zone). The shared GitHub
+        connection is detached from the RC state beforehand so it survives for
+        later runs.
         """
-        deploy_dir = git.work_dir / "deploy" / TARGET_ENVIRONMENT / self.region
-        with open(deploy_dir / "pipeline-provisioner-inputs" / "regional-cluster.json") as f:
-            rc = json.load(f)
-        with open(deploy_dir / "pipeline-regional-cluster-inputs" / "terraform.json") as f:
-            deployment_name = json.load(f)["deployment_name"]
-        regional_id = rc["regional_id"]
-        region = rc.get("region", self.region)
+        rendered_dir = git.work_dir / "deploy" / TARGET_ENVIRONMENT / self.region
+        regional_cluster = json.loads(
+            (rendered_dir / "pipeline-provisioner-inputs" / "regional-cluster.json").read_text()
+        )
+        deployment_name = json.loads(
+            (rendered_dir / "pipeline-regional-cluster-inputs" / "terraform.json").read_text()
+        )["deployment_name"]
+        region = regional_cluster["region"]
+        # Teardown can run from a fresh checkout without the bootstrap's
+        # variable files, so pass the variables both roots require.
+        required_vars = [f"-var=region={region}", f"-var=deployment_name={deployment_name}"]
 
         config_dir = git.work_dir / "terraform" / "config"
-        bootstrap_dir = config_dir / "region-bootstrap"
-        central_dir = config_dir / "region-bootstrap-central"
-        (bootstrap_dir / "region-bootstrap.auto.tfvars.json").write_text(json.dumps({
-            "region": region, "name_prefix": git.eph_prefix, "deployment_name": deployment_name,
-        }))
-        (central_dir / "region-bootstrap-central.auto.tfvars.json").write_text(json.dumps({
-            "region": region, "deployment_name": deployment_name,
-        }))
-
+        central_root = config_dir / "region-bootstrap-central"
+        rc_root = config_dir / "region-bootstrap"
+        central_env = {**os.environ, **self.aws.subprocess_env}
+        rc_env = {**os.environ, **self.aws.target_subprocess_env("regional")}
         central_account_id = self.aws.session.client("sts").get_caller_identity()["Account"]
-        central_env = os.environ.copy()
-        central_env.update(self.aws.subprocess_env)
-        rc_env = os.environ.copy()
-        rc_env.update(self.aws.target_subprocess_env("regional"))
+        state_key = f"{regional_cluster['regional_id']}.tfstate"
+
+        def terraform(root: Path, env: dict[str, str], *args: str, **kwargs):
+            kwargs.setdefault("timeout", TEARDOWN_TIMEOUT)
+            return subprocess.run(["terraform", *args], cwd=root, env=env, check=True, **kwargs)
 
         try:
-            self._terraform_init(
-                central_dir, central_env, f"terraform-state-{central_account_id}",
-                f"{git.eph_prefix}-region-bootstrap-central/{regional_id}.tfstate", region,
+            terraform(
+                central_root, central_env, "init", "-reconfigure",
+                f"-backend-config=bucket=terraform-state-{central_account_id}",
+                f"-backend-config=key={git.eph_prefix}-region-bootstrap-central/{state_key}",
+                f"-backend-config=region={region}",
+                "-backend-config=use_lockfile=true",
             )
-            self._terraform_init(
-                bootstrap_dir, rc_env, f"terraform-state-{rc['account_id']}-{region}",
-                f"{git.eph_prefix}-region-bootstrap/{regional_id}.tfstate", region,
+            terraform(
+                rc_root, rc_env, "init", "-reconfigure",
+                f"-backend-config=bucket=terraform-state-{regional_cluster['account_id']}-{region}",
+                f"-backend-config=key={git.eph_prefix}-region-bootstrap/{state_key}",
+                f"-backend-config=region={region}",
+                "-backend-config=use_lockfile=true",
             )
 
-            # The connection is shared across environments. An unsuccessful
-            # state removal must never turn into deletion of that connection.
+            # An unsuccessful state removal must never turn into deletion of
+            # the shared connection.
             connection_resource = "aws_codestarconnections_connection.github"
 
             def connection_in_state():
-                result = subprocess.run(
-                    ["terraform", "state", "list"],
-                    cwd=bootstrap_dir,
-                    env=rc_env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                return connection_resource in result.stdout.splitlines()
+                state = terraform(rc_root, rc_env, "state", "list", capture_output=True, text=True, timeout=60)
+                return connection_resource in state.stdout.splitlines()
 
             if connection_in_state():
-                subprocess.run(
-                    ["terraform", "state", "rm", connection_resource],
-                    cwd=bootstrap_dir,
-                    env=rc_env,
-                    check=True,
-                    timeout=60,
-                )
+                terraform(rc_root, rc_env, "state", "rm", connection_resource, timeout=60)
             if connection_in_state():
                 raise RuntimeError(
                     "Refusing bootstrap destruction: the shared GitHub connection "
                     "is still managed by this Terraform state"
                 )
 
-            for work_dir, env in ((central_dir, central_env), (bootstrap_dir, rc_env)):
-                subprocess.run(
-                    ["terraform", "destroy", "-auto-approve"],
-                    cwd=work_dir,
-                    env=env,
-                    check=True,
-                    timeout=TEARDOWN_TIMEOUT,
-                )
+            terraform(central_root, central_env, "destroy", "-auto-approve", *required_vars)
+            terraform(rc_root, rc_env, "destroy", "-auto-approve", *required_vars)
         except subprocess.TimeoutExpired:
             raise RuntimeError(
                 f"Terraform teardown timed out after {TEARDOWN_TIMEOUT}s"
