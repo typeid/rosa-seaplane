@@ -67,7 +67,7 @@ These tools are available in all CI job containers and can be used in scripts ru
 The [ci/ephemeral-provider/main.py](ci/ephemeral-provider/main.py) script manages ephemeral environments for CI testing. It supports provision, resume (`--resume`), teardown (`--teardown`), and resync (`--resync`) modes, designed to run as separate CI steps with tests in between.
 
 1. Creates a CI-owned git branch from the source repo/branch and pushes rendered deploy files
-2. Bootstraps the central shared resources and per-cluster CodePipelines pointing at the CI branch
+2. Bootstraps the region (pipeline infrastructure in the RC account, DNS delegation in central) and per-cluster CodePipelines pointing at the CI branch
 3. Adopts each new pipeline's automatically started execution; later matching pushes trigger through the CodeStar connection
 4. Waits for RC/MC pipelines to provision infrastructure
 5. (Separate CI step) Runs the testing suite against the provisioned environment
@@ -135,8 +135,8 @@ All CI scripts and the ephemeral provider use a standard set of named AWS CLI pr
 
 | Profile        | Account          | Purpose                                                |
 | -------------- | ---------------- | ------------------------------------------------------ |
-| `rrp-central`  | Central          | Bootstrap resources, cluster pipelines, SSM parameters |
-| `rrp-rc`       | Regional Cluster | API Gateway auth, regional infra                       |
+| `rrp-central`  | Central          | Region bootstrap, environment DNS zone, SSM parameters |
+| `rrp-rc`       | Regional Cluster | API Gateway auth, regional infra, cluster pipelines    |
 | `rrp-mc`       | Management       | Management cluster provisioning                        |
 | `rrp-customer` | Customer         | HCP creation e2e tests                                 |
 

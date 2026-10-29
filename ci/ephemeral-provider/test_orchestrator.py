@@ -18,6 +18,7 @@ def make_env():
     env.target_monitor.start_pipeline.side_effect = lambda pipeline, *a, **kw: pipeline
     env._delete_cluster_resources = Mock()
     env._destroy_provisioner = Mock()
+    env._publish_zoa_discovery = Mock()
     env.collect_codebuild_logs = Mock()
     return env
 
@@ -79,6 +80,23 @@ def test_failed_teardown_preserves_pipeline_and_bootstrap_resources(failed_proje
     git.delete_eph_branch.assert_not_called()
 
 
+def write_rendered_region(work_dir):
+    deploy_dir = work_dir / "deploy" / "ephemeral" / "us-east-1"
+    (deploy_dir / "pipeline-provisioner-inputs").mkdir(parents=True)
+    (deploy_dir / "pipeline-regional-cluster-inputs").mkdir(parents=True)
+    (deploy_dir / "pipeline-provisioner-inputs" / "regional-cluster.json").write_text(json.dumps({
+        "region": "us-east-1",
+        "account_id": "111111111111",
+        "child_admin_role_name": "OrganizationAccountAccessRole",
+        "regional_id": "eph-test-regional",
+    }))
+    (deploy_dir / "pipeline-regional-cluster-inputs" / "terraform.json").write_text(json.dumps({
+        "deployment_name": "us-east-1",
+    }))
+    (work_dir / "terraform" / "config" / "region-bootstrap").mkdir(parents=True)
+    (work_dir / "terraform" / "config" / "region-bootstrap-central").mkdir(parents=True)
+
+
 @pytest.mark.parametrize(
     "state_failure",
     [None, "already_absent", "initial_read", "remove", "verification_read", "still_present"],
@@ -86,16 +104,21 @@ def test_failed_teardown_preserves_pipeline_and_bootstrap_resources(failed_proje
 def test_bootstrap_destroy_requires_shared_connection_detached(tmp_path, state_failure):
     env = make_env()
     env.aws = Mock(subprocess_env={}, central_region="us-east-1")
+    env.aws.target_subprocess_env.return_value = {}
     env.aws.session.client.return_value.get_caller_identity.return_value = {
         "Account": "000000000000",
     }
     git = Mock(work_dir=tmp_path, eph_prefix="eph-test", fork_repo="owner/repo")
+    write_rendered_region(tmp_path)
     connection = "aws_codestarconnections_connection.github"
     state_reads = 0
     destroyed = False
+    init_commands = []
 
     def run(command, **kwargs):
         nonlocal state_reads, destroyed
+        if command[:2] == ["terraform", "init"]:
+            init_commands.append(command)
         if command[:3] == ["terraform", "state", "list"]:
             state_reads += 1
             if state_failure == ("initial_read" if state_reads == 1 else "verification_read"):
@@ -116,6 +139,10 @@ def test_bootstrap_destroy_requires_shared_connection_detached(tmp_path, state_f
         if state_failure in (None, "already_absent"):
             EphemeralEnvOrchestrator._destroy_provisioner(env, git)
             assert destroyed
+            assert "-backend-config=key=eph-test-region-bootstrap-central/eph-test-regional.tfstate" in init_commands[0]
+            assert "-backend-config=bucket=terraform-state-000000000000" in init_commands[0]
+            assert "-backend-config=key=eph-test-region-bootstrap/eph-test-regional.tfstate" in init_commands[1]
+            assert "-backend-config=bucket=terraform-state-111111111111-us-east-1" in init_commands[1]
         else:
             with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
                 EphemeralEnvOrchestrator._destroy_provisioner(env, git)

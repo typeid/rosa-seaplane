@@ -11,24 +11,37 @@
 #   GITHUB_REPOSITORY    - GitHub repository in owner/name format
 #   GITHUB_BRANCH        - GitHub branch to track
 #   GITHUB_CONNECTION_ARN - resolved CodeStar connection ARN from bootstrap
-#   RC_CODEBUILD_ROLE_ARN - ARN of the centrally-managed RC CodeBuild role
-#   MC_CODEBUILD_ROLE_ARN - ARN of the shared MC CodeBuild role
+#   CODEBUILD_ROLE_ARN   - ARN of the CodeBuild role for all RC/MC projects
 #   CODEPIPELINE_ROLE_ARN - ARN of the shared cluster CodePipeline role
 #   PIPELINE_ARTIFACT_BUCKET - S3 bucket used by cluster CodePipelines
+#   CENTRAL_ACCOUNT_ID   - optional; defaults to the caller (central) account
 
 set -euo pipefail
 trap 'echo "FAILED: line $LINENO, exit code $?" >&2' ERR
 
 echo "Provisioning cluster CodeBuild and CodePipeline resources for ${ENVIRONMENT:-staging}"
 
+# CodeBuild/CodePipeline calls run in the pipeline account: the RC account
+# that hosts the region's RC and MC pipelines (see init_pipeline_account).
 # Match the conditional FIPS endpoint policy of the Terraform-managed pipelines
-# these CodeBuild/CodePipeline API calls replace. Other AWS calls keep their
-# service-specific endpoint configuration.
+# these calls replace. Other AWS calls keep the caller's (central) credentials
+# and their service-specific endpoint configuration.
 aws_cluster_pipeline() {
     local region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
     local use_fips=false
     [[ "$region" == us-* ]] && use_fips=true
-    AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
+    if [[ -z "${_PIPELINE_ACCOUNT_ID:-}" ]]; then
+        echo "ERROR: Pipeline account not selected; call init_pipeline_account first" >&2
+        return 1
+    fi
+    if [[ -n "${_PIPELINE_AWS_ACCESS_KEY_ID:-}" ]]; then
+        AWS_ACCESS_KEY_ID="$_PIPELINE_AWS_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$_PIPELINE_AWS_SECRET_ACCESS_KEY" \
+        AWS_SESSION_TOKEN="$_PIPELINE_AWS_SESSION_TOKEN" \
+        AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
+    else
+        AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
+    fi
 }
 
 sha256_stdin() {
@@ -155,6 +168,12 @@ _CENTRAL_AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
 # Track which target accounts have had state buckets bootstrapped
 BOOTSTRAPPED_ACCOUNTS=""
 
+# Pipeline account credentials (empty keys: the caller is already in it)
+_PIPELINE_ACCOUNT_ID=""
+_PIPELINE_AWS_ACCESS_KEY_ID=""
+_PIPELINE_AWS_SECRET_ACCESS_KEY=""
+_PIPELINE_AWS_SESSION_TOKEN=""
+
 # Bootstrap state bucket in a target account (idempotent)
 bootstrap_target_state_bucket() {
     local target_account_id="$1"
@@ -192,6 +211,33 @@ bootstrap_target_state_bucket() {
     fi
 
     BOOTSTRAPPED_ACCOUNTS="${BOOTSTRAPPED_ACCOUNTS}|${target_account_id}|"
+}
+
+# All RC and MC pipelines of a region live in its RC account, read from the
+# regional-cluster.json next to the given cluster config. Assumes the RC child
+# admin role unless the caller is already in that account.
+init_pipeline_account() {
+    local rc_config account_id role_name creds
+    rc_config="$(dirname "$1")/regional-cluster.json"
+
+    account_id=$(jq -er '.account_id' "$rc_config") &&
+        account_id=$(resolve_ssm_param "$account_id" "$(jq -er '.region' "$rc_config")") &&
+        role_name=$(jq -er '.child_admin_role_name // "OrganizationAccountAccessRole"' "$rc_config") || {
+        echo "ERROR: Could not read the RC account from $rc_config" >&2
+        return 1
+    }
+    [[ "$account_id" =~ ^[0-9]{12}$ ]] || { echo "ERROR: Invalid RC account in $rc_config" >&2; return 1; }
+    [ "${_PIPELINE_ACCOUNT_ID:-}" = "$account_id" ] && return 0
+
+    if [ "$(aws sts get-caller-identity --query Account --output text --no-cli-pager)" != "$account_id" ]; then
+        creds=$(aws sts assume-role \
+            --role-arn "arn:aws:iam::${account_id}:role/${role_name}" \
+            --role-session-name "cluster-pipelines-${account_id}" \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text --no-cli-pager) || return 1
+        read -r _PIPELINE_AWS_ACCESS_KEY_ID _PIPELINE_AWS_SECRET_ACCESS_KEY _PIPELINE_AWS_SESSION_TOKEN <<< "$creds"
+    fi
+    _PIPELINE_ACCOUNT_ID="$account_id"
 }
 
 # Resolve SSM parameter if value starts with "ssm://"
@@ -251,19 +297,16 @@ generate_project_spec() {
             {name: "REPOSITORY_BRANCH", value: $repo_branch, type: "PLAINTEXT"}
         ]')
 
-    # Add cluster-type-specific env vars
-    if [ "$cluster_type" = "regional" ] && [ -n "${ENVIRONMENT_HOSTED_ZONE_ID:-}" ]; then
+    # Add cluster-type-specific env vars. The RC build only needs the central
+    # account ID as a value (ZOA Access invoker trust), not access to it.
+    if [ "$cluster_type" = "regional" ]; then
         env_vars=$(echo "$env_vars" | jq \
             --arg regional_id "${REGIONAL_ID:-}" \
-            --arg zone_id "${ENVIRONMENT_HOSTED_ZONE_ID:-}" \
+            --arg central_account_id "${CENTRAL_ACCOUNT_ID:-}" \
             '. + [
                 {name: "REGIONAL_ID", value: $regional_id, type: "PLAINTEXT"},
-                {name: "ENVIRONMENT_HOSTED_ZONE_ID", value: $zone_id, type: "PLAINTEXT"}
+                {name: "ZOA_CENTRAL_ACCOUNT_ID", value: $central_account_id, type: "PLAINTEXT"}
             ]')
-    elif [ "$cluster_type" = "regional" ]; then
-        env_vars=$(echo "$env_vars" | jq \
-            --arg regional_id "${REGIONAL_ID:-}" \
-            '. + [{name: "REGIONAL_ID", value: $regional_id, type: "PLAINTEXT"}]')
     elif [ "$cluster_type" = "management" ]; then
         env_vars=$(echo "$env_vars" | jq \
             --arg management_id "${MANAGEMENT_ID:-}" \
@@ -685,12 +728,11 @@ create_cluster_resource() {
     local region_deployment="$3"
     local service_role_arn buildspec_path timeout_minutes
 
+    service_role_arn="${CODEBUILD_ROLE_ARN:-}"
     if [ "$cluster_type" = "regional" ]; then
-        service_role_arn="${RC_CODEBUILD_ROLE_ARN:-}"
         buildspec_path="terraform/config/codebuild-regional-cluster/buildspec-combined.yml"
         timeout_minutes=90
     else
-        service_role_arn="${MC_CODEBUILD_ROLE_ARN:-}"
         buildspec_path="terraform/config/codebuild-management-cluster/buildspec-combined.yml"
         timeout_minutes=180
     fi
@@ -700,11 +742,15 @@ create_cluster_resource() {
         echo "ERROR: Missing CodeBuild service role ARN for $cluster_type cluster $CLUSTER_PROJECT_ID" >&2
         return 1
     fi
+    if [ "$cluster_type" = "regional" ]; then
+        init_central_state || return 1
+    fi
     if ! PLATFORM_IMAGE=$(jq -er '.platform_image // empty' "$config_path"); then
         echo "ERROR: platform_image is missing from $config_path" >&2
         return 1
     fi
     bootstrap_target_state_bucket "$TARGET_ACCOUNT_ID" "$AWS_REGION" || return 1
+    init_pipeline_account "$config_path" || return 1
 
     upsert_project "$cluster_type" "$CLUSTER_PROJECT_ID" "$service_role_arn" \
         "$buildspec_path" "$timeout_minutes" "$CLUSTER_PROJECT_ID" || return 1
@@ -733,6 +779,7 @@ delete_cluster_resource() {
         return 1
     fi
 
+    init_pipeline_account "$config_path" || return 1
     delete_project "$CLUSTER_PROJECT_ID"
 }
 
@@ -756,6 +803,7 @@ print_usage() {
     cat <<'EOF'
 Usage:
   provision-cluster-resources.sh
+  provision-cluster-resources.sh ensure-environment-zone --region-deployment REGION
   provision-cluster-resources.sh create-rc --config PATH --region-deployment REGION
   provision-cluster-resources.sh delete-rc --config PATH
   provision-cluster-resources.sh create-mc --config PATH --region-deployment REGION
@@ -764,7 +812,9 @@ Usage:
 The no-argument form processes all rendered RC/MC configs. Explicit actions
 operate on one cluster and are suitable for the MC autoscaler. Explicit create
 actions only create/update resources; the caller starts the pipeline at the
-desired source revision.
+desired source revision. Pipelines and projects are created in the RC account
+of the cluster's region. ensure-environment-zone creates or looks up the
+environment DNS zone in the calling (central) account.
 EOF
 }
 
@@ -808,7 +858,6 @@ run_cluster_action() {
     case "$action" in
         create-rc|CreateRC)
             [ -n "$region_deployment" ] || { echo "ERROR: --region-deployment is required" >&2; return 2; }
-            resolve_environment_hosted_zone "$region_deployment" || return 1
             create_rc "$config_path" "$region_deployment"
             ;;
         delete-rc|DeleteRC)
@@ -831,8 +880,43 @@ run_cluster_action() {
 
 ENVIRONMENT="${ENVIRONMENT:-${TARGET_ENVIRONMENT:-staging}}"
 
+ensure_environment_zone_action() {
+    local region_deployment="${REGION_DEPLOYMENT:-}"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --region-deployment)
+                [ "$#" -ge 2 ] || { echo "ERROR: --region-deployment requires a value" >&2; return 2; }
+                region_deployment="$2"
+                shift 2
+                ;;
+            --environment)
+                [ "$#" -ge 2 ] || { echo "ERROR: --environment requires a value" >&2; return 2; }
+                ENVIRONMENT="$2"
+                shift 2
+                ;;
+            *)
+                echo "ERROR: Unknown option: $1" >&2
+                return 2
+                ;;
+        esac
+    done
+
+    [ -n "$region_deployment" ] || { echo "ERROR: --region-deployment is required" >&2; return 2; }
+    validate_environment || return 2
+    resolve_environment_hosted_zone "$region_deployment" || return 1
+    if [ -n "${ENVIRONMENT_HOSTED_ZONE_ID:-}" ]; then
+        echo "Environment zone ${ENVIRONMENT_DOMAIN}: ${ENVIRONMENT_HOSTED_ZONE_ID}"
+    fi
+}
+
 if [ "$#" -gt 0 ]; then
     case "$1" in
+        ensure-environment-zone)
+            shift
+            ensure_environment_zone_action "$@"
+            exit $?
+            ;;
         create-rc|CreateRC|delete-rc|DeleteRC|create-mc|CreateMC|delete-mc|DeleteMC)
             run_cluster_action "$@"
             exit $?
@@ -856,42 +940,9 @@ fi
 # Validate environment
 validate_environment
 
-# Detect TF state region
-init_central_state
-TF_STATE_REGION=""
-if [ -d "deploy/${ENVIRONMENT}" ]; then
-    FIRST_REGIONAL_JSON=$(find "deploy/${ENVIRONMENT}" -name "regional-cluster.json" -path "*/pipeline-provisioner-inputs/*" -type f | head -n 1)
-    if [ -n "$FIRST_REGIONAL_JSON" ]; then
-        TF_STATE_REGION=$(jq -r '.tf_state_region // empty' "$FIRST_REGIONAL_JSON" 2>/dev/null || echo "")
-    fi
-fi
-
-if [ -z "$TF_STATE_REGION" ]; then
-    BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$TF_STATE_BUCKET" --region us-east-1 --query LocationConstraint --output text --no-cli-pager 2>/dev/null || echo "")
-    if [ "$BUCKET_REGION" == "None" ] || [ "$BUCKET_REGION" == "null" ] || [ -z "$BUCKET_REGION" ]; then
-        TF_STATE_REGION="us-east-1"
-    else
-        TF_STATE_REGION="$BUCKET_REGION"
-    fi
-fi
-
 # FORCE_DELETE_ALL_PIPELINES CI hack
 FORCE_DELETE_ALL_PIPELINES="${FORCE_DELETE_ALL_PIPELINES:-false}"
 PROVISION_FAILURES=0
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DNS Environment Zone (terraform block preserved)
-# ──────────────────────────────────────────────────────────────────────────────
-
-for _first_region_dir in deploy/${ENVIRONMENT}/*/; do
-    [ -d "$_first_region_dir" ] || continue
-    _region_deployment=$(basename "$_first_region_dir")
-    break
-done
-
-if [[ -n "${_region_deployment:-}" && "$FORCE_DELETE_ALL_PIPELINES" != "true" ]]; then
-    resolve_environment_hosted_zone "$_region_deployment"
-fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Process regions

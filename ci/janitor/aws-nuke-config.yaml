@@ -161,7 +161,8 @@ presets:
       Route53HostedZone: *glob-name-all
       CodeBuildSourceCredential: *glob-name-all
 
-  # Preserve CodeStar connection for central accounts
+  # Preserve the shared CodeStar connection (lives in the RC accounts, where the
+  # cluster pipelines run)
   central:
     filters:
       CodeStarConnection:
@@ -211,7 +212,7 @@ accounts:
   "662212752128":
     presets: [globals, ci, central]
   "720644165472":
-    presets: [globals, ci]
+    presets: [globals, ci, central]
   "129678139271":
     presets: [globals, ci, mc]
   "313828097858":
@@ -221,7 +222,7 @@ accounts:
   "791666871613":
     presets: [globals, ci, shared-dev, central]
   "599476212575":
-    presets: [globals, ci, shared-dev]
+    presets: [globals, ci, shared-dev, central]
   "855246887846":
     presets: [globals, ci, shared-dev, mc]
   "114594328247":

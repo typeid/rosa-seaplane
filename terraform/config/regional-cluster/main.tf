@@ -31,72 +31,6 @@ provider "aws" {
   }
 }
 
-# Central account provider for cross-account DNS delegation.
-# In pipelines, ambient creds are the target account (after use_mc_account),
-# so this provider uses a named profile written by the buildspec script.
-# For local dev, central_aws_profile is empty and ambient creds are used.
-provider "aws" {
-  alias             = "central"
-  region            = var.region
-  profile           = var.central_aws_profile != "" ? var.central_aws_profile : null
-  use_fips_endpoint = can(regex("^(us|us-gov)-", var.region)) ? true : false
-
-  default_tags {
-    tags = merge(
-      {
-        app-code      = var.app_code
-        service-phase = var.service_phase
-        cost-center   = var.cost_center
-        environment   = var.environment
-      },
-      var.eph_prefix != "" ? { ephemeral-prefix = var.eph_prefix } : {}
-    )
-  }
-}
-
-data "aws_caller_identity" "central" {
-  provider = aws.central
-}
-
-# Central account providers for ZOA deployment SSM (/zoa/deployments/*).
-# Primary + replica regions; CLI defaults to primary with automatic replica failover.
-provider "aws" {
-  alias             = "central_deployments"
-  region            = var.zoa_central_deployments_primary_region
-  profile           = var.central_aws_profile != "" ? var.central_aws_profile : null
-  use_fips_endpoint = can(regex("^(us|us-gov)-", var.zoa_central_deployments_primary_region)) ? true : false
-
-  default_tags {
-    tags = merge(
-      {
-        app-code      = var.app_code
-        service-phase = var.service_phase
-        cost-center   = var.cost_center
-        environment   = var.environment
-      },
-      var.eph_prefix != "" ? { ephemeral-prefix = var.eph_prefix } : {}
-    )
-  }
-}
-
-provider "aws" {
-  alias             = "central_deployments_replica"
-  region            = var.zoa_central_deployments_replica_region
-  profile           = var.central_aws_profile != "" ? var.central_aws_profile : null
-  use_fips_endpoint = can(regex("^(us|us-gov)-", var.zoa_central_deployments_replica_region)) ? true : false
-
-  default_tags {
-    tags = merge(
-      {
-        app-code      = var.app_code
-        service-phase = var.service_phase
-        cost-center   = var.cost_center
-        environment   = var.environment
-      },
-      var.eph_prefix != "" ? { ephemeral-prefix = var.eph_prefix } : {}
-    )
-  }
-}
 
 # When PagerDuty is disabled, a dummy token lets the provider initialize
 # without PAGERDUTY_TOKEN. When enabled, null falls through to the env var.
@@ -335,7 +269,7 @@ module "api_gateway" {
 
   # Custom domain (e.g. api.us-east-1.int0.rosa.devshift.net)
   api_domain_name         = var.enable_api_custom_domain && var.environment_domain != null ? "api.${var.deployment_name}.${var.environment_domain}" : null
-  regional_hosted_zone_id = var.environment_domain != null ? aws_route53_zone.regional[0].zone_id : null
+  regional_hosted_zone_id = var.environment_domain != null ? data.aws_route53_zone.regional[0].zone_id : null
 
   # Method-level throttling and observability
   metrics_enabled        = var.api_metrics_enabled
@@ -373,7 +307,7 @@ module "sre_ui_alb" {
   node_security_group_id = module.regional_cluster.node_security_group_id
   cluster_name           = module.regional_cluster.cluster_name
 
-  regional_hosted_zone_id = var.environment_domain != null ? aws_route53_zone.regional[0].zone_id : null
+  regional_hosted_zone_id = var.environment_domain != null ? data.aws_route53_zone.regional[0].zone_id : null
   deployment_name         = var.deployment_name
   environment_domain      = var.environment_domain
 
@@ -407,44 +341,17 @@ module "rhobs_api_gateway" {
 # =============================================================================
 # Regional DNS Zone (Optional)
 #
-# When environment_domain is set, creates:
-# - Regional hosted zone (<region>.<environment_domain>) in the RC account
-# - NS delegation records in the environment zone (central account)
-# - Initial zone shard (0.<region>.<environment_domain>) for cluster records
+# The region bootstrap (terraform/config/region-bootstrap) creates the regional
+# hosted zone (<deployment_name>.<environment_domain>) in the RC account and its
+# delegation in the central environment zone. The RC Terraform only looks the
+# zone up and owns everything beneath it.
 # =============================================================================
 
-resource "aws_route53_zone" "regional" {
+data "aws_route53_zone" "regional" {
   count = var.environment_domain != null ? 1 : 0
 
-  name = "${var.deployment_name}.${var.environment_domain}"
-
-  tags = {
-    Name     = "${var.deployment_name}.${var.environment_domain}"
-    function = "dns"
-    module   = "regional-cluster"
-  }
-}
-
-# Look up the environment zone in the central account so we can create NS
-# delegation without owning the zone in this state.
-data "aws_route53_zone" "environment" {
-  count    = var.environment_domain != null ? 1 : 0
-  provider = aws.central
-
-  name         = var.environment_domain
+  name         = "${var.deployment_name}.${var.environment_domain}"
   private_zone = false
-}
-
-# NS delegation from the environment zone (central account) to the regional zone
-resource "aws_route53_record" "regional_delegation" {
-  count    = var.environment_domain != null ? 1 : 0
-  provider = aws.central
-
-  zone_id = data.aws_route53_zone.environment[0].zone_id
-  name    = "${var.deployment_name}.${var.environment_domain}"
-  type    = "NS"
-  ttl     = 300
-  records = aws_route53_zone.regional[0].name_servers
 }
 
 # =============================================================================
@@ -472,7 +379,7 @@ resource "aws_route53_zone" "zone_shard" {
 resource "aws_route53_record" "zone_shard_delegation" {
   count = var.environment_domain != null ? var.zone_shard_count : 0
 
-  zone_id = aws_route53_zone.regional[0].zone_id
+  zone_id = data.aws_route53_zone.regional[0].zone_id
   name    = "${count.index}.${var.deployment_name}.${var.environment_domain}"
   type    = "NS"
   ttl     = 300
@@ -492,7 +399,7 @@ module "dns_zone_operator" {
   source = "../../modules/dns-zone-operator"
 
   regional_id                = var.regional_id
-  regional_hosted_zone_id    = aws_route53_zone.regional[0].zone_id
+  regional_hosted_zone_id    = data.aws_route53_zone.regional[0].zone_id
   zone_shard_hosted_zone_ids = aws_route53_zone.zone_shard[*].zone_id
   region_ou_path             = var.region_ou_path
 }
@@ -576,18 +483,12 @@ module "bedrock" {
 module "zoa_access" {
   source = "../../modules/zoa-access"
 
-  providers = {
-    aws                             = aws
-    aws.central_deployments         = aws.central_deployments
-    aws.central_deployments_replica = aws.central_deployments_replica
-  }
-
   depends_on = [module.zoa, module.zoa_lambda]
 
   regional_id = var.regional_id
   image_uri   = module.zoa.lambda_image_uri
 
-  central_account_id                 = data.aws_caller_identity.central.account_id
+  central_account_id                 = var.central_account_id
   trusted_assumer_role_names         = var.zoa_access_trusted_assumer_role_names
   trusted_assumer_role_name_suffixes = var.zoa_access_trusted_assumer_role_name_suffixes
 

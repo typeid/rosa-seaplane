@@ -1,8 +1,3 @@
-provider "aws" {
-  region            = var.region
-  use_fips_endpoint = can(regex("^(us|us-gov)-", var.region)) ? true : false
-}
-
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -147,4 +142,30 @@ resource "aws_iam_role_policy" "pipeline" {
       }
     ] : [])
   })
+}
+
+# One CodeBuild role for all RC and MC projects. The projects run in the RC
+# account and apply the RC Terraform and RC-side MC resources there, and assume
+# the child admin role in each MC account (whose trust policy names this role).
+# AdministratorAccess matches the child admin role the builds previously
+# assumed in the RC account.
+resource "aws_iam_role" "codebuild" {
+  name = "${local.name_prefix}cluster-codebuild-role"
+  tags = local.common_tags
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "sts:AssumeRole"
+      Principal = {
+        Service = "codebuild.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_admin" {
+  role       = aws_iam_role.codebuild.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }

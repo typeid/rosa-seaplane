@@ -102,12 +102,14 @@ class ClusterProjectLifecycleTest(unittest.TestCase):
             "PLATFORM_IMAGE": "example.invalid/platform:current",
             "CODEPIPELINE_ROLE_ARN": self.scope,
             "PIPELINE_ARTIFACT_BUCKET": "test-pipeline-artifacts",
+            # Pipeline account already selected; ambient credentials are used.
+            "_PIPELINE_ACCOUNT_ID": "123456789012",
         }
         # Only top-level function definitions are evaluated, never the script's
         # main provisioning loop or account-bootstrap side effects.
         self.functions = "\n".join(
             function
-            for script in ("provision-cluster-resources.sh", "bootstrap-central-account.sh")
+            for script in ("provision-cluster-resources.sh", "bootstrap-region.sh")
             for function in re.findall(
                 r"^[a-zA-Z_][a-zA-Z_0-9]*\(\) \{\n.*?^\}",
                 (Path(__file__).resolve().parents[2] / "scripts" / script).read_text(),
@@ -123,6 +125,8 @@ import sys
 args = sys.argv[1:]
 with open(os.environ["TEST_AWS_CALLS"], "a") as calls:
     calls.write(json.dumps(args) + "\\n")
+with open(os.environ["TEST_AWS_CALLS"] + ".keys", "a") as keys:
+    keys.write(os.environ.get("AWS_ACCESS_KEY_ID", "") + "\\n")
 state_path = Path(os.environ["TEST_AWS_STATE"])
 state = json.loads(state_path.read_text())
 operation = " ".join(args[:2])
@@ -158,6 +162,10 @@ elif operation == "codebuild delete-project":
     state["project"] = None
 elif operation == "ssm get-parameter":
     print(state["ssm_value"])
+elif operation == "sts get-caller-identity":
+    print(state.get("caller", "123456789012"))
+elif operation == "sts assume-role":
+    print("ASIAPIPELINE secret token")
 else:
     print(f"Unexpected AWS operation: {args}", file=sys.stderr)
     sys.exit(99)
@@ -169,6 +177,7 @@ state_path.write_text(json.dumps(state))
         if state is not None:
             self.state_path.write_text(json.dumps(state))
         self.calls_path.write_text("")
+        Path(str(self.calls_path) + ".keys").write_text("")
         return subprocess.run(
             [
                 "bash", "-c",
@@ -426,6 +435,56 @@ state_path.write_text(json.dumps(state))
             ["codepipeline", "delete-pipeline"],
             ["codebuild", "delete-project"],
         ])
+
+    def _select_pipeline_account(self, rc_account, caller):
+        (self.root / "region").mkdir(exist_ok=True)
+        (self.root / "region" / "regional-cluster.json").write_text(json.dumps({
+            "region": "us-east-1",
+            "regional_id": "regional",
+            "account_id": rc_account,
+            "child_admin_role_name": "OrganizationAccountAccessRole",
+        }))
+        return self._run(
+            '_PIPELINE_ACCOUNT_ID=""\n'
+            "init_pipeline_account region/management-cluster-mc01.json\n"
+            "aws_cluster_pipeline codebuild delete-project --name custom-cluster",
+            {"project": None, "pipeline": None, "caller": caller},
+        )
+
+    def test_pipeline_calls_use_assumed_rc_account_credentials(self):
+        result = self._select_pipeline_account("210987654321", "123456789012")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self._calls()
+        self.assertEqual([call[:2] for call in calls], [
+            ["sts", "get-caller-identity"],
+            ["sts", "assume-role"],
+            ["codebuild", "delete-project"],
+        ])
+        self.assertIn("arn:aws:iam::210987654321:role/OrganizationAccountAccessRole", calls[1])
+        keys = Path(str(self.calls_path) + ".keys").read_text().splitlines()
+        self.assertEqual(keys[2], "ASIAPIPELINE")
+
+    def test_pipeline_calls_use_ambient_credentials_in_rc_account(self):
+        result = self._select_pipeline_account("123456789012", "123456789012")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call[:2] for call in self._calls()], [
+            ["sts", "get-caller-identity"],
+            ["codebuild", "delete-project"],
+        ])
+        keys = Path(str(self.calls_path) + ".keys").read_text().splitlines()
+        self.assertEqual(keys[1], "")
+
+    def test_pipeline_calls_refuse_without_selected_account(self):
+        result = self._run(
+            '_PIPELINE_ACCOUNT_ID=""\n'
+            "aws_cluster_pipeline codebuild delete-project --name custom-cluster"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Pipeline account not selected", result.stderr)
+        self.assertEqual(self._calls(), [])
 
     def _read_bootstrap_descriptor(self, config, state=None, id_field="regional_id"):
         (self.root / "cluster.json").write_text(json.dumps(config))

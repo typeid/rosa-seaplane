@@ -126,7 +126,7 @@ flowchart TB
     B -->|push rendered config| C
 
     subgraph PROVISION ["Provision"]
-        C[bootstrap-central-account.sh] --> D[provision-cluster-resources.sh]
+        C[bootstrap-region.sh] --> D[provision-cluster-resources.sh]
         D -->|creates| E[RC pipeline] -->|provisions| F[Regional Cluster]
         D -->|creates| G[MC pipeline] -->|provisions| H[Management Cluster]
     end

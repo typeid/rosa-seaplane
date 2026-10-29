@@ -3,7 +3,8 @@
 **Status:** Current
 
 Each RC and MC has one CodePipeline invoking a single combined CodeBuild project.
-Terraform owns shared resources; the cluster resource script owns dynamic
+All of a region's pipelines run in that region's RC account. Terraform owns the
+region's shared pipeline resources; the cluster resource script owns dynamic
 CodeBuild/CodePipeline lifecycle. The platform image is built by Konflux from
 `terraform/modules/platform-image/Dockerfile` and referenced by the rendered
 `platform_image` config value.
@@ -45,6 +46,40 @@ before completing its dependent work. The combined CodeBuild worker also gives
 up stage-level isolation: retrying a failed later phase reruns the earlier
 idempotent phases in that cluster build.
 
+## Pipeline account
+
+Pipelines run in the RC account so that RC deploys, MC deploys, and MC scaling
+do not depend on a shared central account, and an MC autoscaler in the RC EKS
+cluster can manage MC pipelines in its own account. The RC and MC pipelines
+have no access to the central account.
+
+`scripts/bootstrap-region.sh` runs from the central account once per RC. It
+applies two Terraform roots, each confined to one account:
+
+- **`region-bootstrap` (RC account, RC credentials, RC state bucket):** the
+  GitHub connection, the `codepipeline-shared` module (artifact bucket,
+  CodePipeline role, one CodeBuild role for all RC and MC projects), failure
+  notifications, and the regional hosted zone.
+- **`region-bootstrap-central` (central account):** the regional zone's NS
+  delegation in the environment zone.
+
+It also copies the `/infra/*/account_id` SSM parameters referenced by the
+rendered build inputs into the RC account, where the builds resolve them.
+
+The ZOA CLI looks deployments up in central SSM (`/zoa/deployments/<name>`).
+The RC Terraform writes that entry into the RC account only, and
+`scripts/publish-zoa-discovery.sh` copies it to central after the RC pipeline
+has applied (the ephemeral provider runs it automatically). This is an interim
+step: ZOA discovery needs a rework (rosa-seaplane-zoa CLI) so regions no longer
+need a central entry at all.
+
+The CodeBuild role has `AdministratorAccess` in the RC account, matching the
+child admin role the builds used to assume there, and MC builds assume the
+child admin role in each MC account. As a consequence, administrator access to
+the RC account can reach the region's MC accounts through the CodeBuild role.
+Protect the pipeline resources and that role with a service control policy on
+the region OU (owned by account minting).
+
 ## Lifecycle contract
 
 `scripts/provision-cluster-resources.sh` supports:
@@ -69,13 +104,11 @@ associated CodePipeline.
 
 ## Authorization and ownership
 
-Bootstrap reads the rendered cluster descriptors, resolves SSM account IDs,
-and grants access to their exact target-account administrator roles. RC workers
-can assume the Regional account role. MC workers can assume the configured
-Management account roles and the Regional account role required for state,
-RC-side MC resources, and cleanup. New target accounts or administrator roles require
-a bootstrap rerun; creating another MC in an already authorized account does
-not require adding its project name to IAM.
+Bootstrap reads the rendered cluster descriptors and resolves SSM account IDs.
+The script creates each pipeline and project in the RC account named by the
+`regional-cluster.json` next to the cluster's config. Each MC account's child
+admin role must trust the CodeBuild role ARN; creating another MC in an
+already trusting account does not require a bootstrap rerun.
 
 Each cluster CodeBuild project carries
 `ProvisioningScope=<CodePipeline-role-ARN>`. That pipeline role can start, stop,
@@ -90,8 +123,9 @@ authorized so running builds can finish while project definitions are updated.
 These controls preserve the current bootstrap structure. They do not establish
 separate account and environment ownership: deployments that share a pipeline
 role also share its project scope, and same-account provisioning retains the
-infrastructure permissions needed by upstream. The shared GitHub connection
-has Terraform destruction protection and survives ephemeral teardown. The
+infrastructure permissions needed by upstream. The GitHub connection in
+each RC account has Terraform destruction protection and survives ephemeral
+teardown. The
 provider must successfully detach it from that run's bootstrap state before
 destroying the remaining bootstrap resources.
 
@@ -118,7 +152,7 @@ prevents destroy executions from starting. Fire-and-forget teardown exits after
 starting all destroy executions, without waiting for cluster destruction or
 deleting those pipeline/bootstrap resources or the branch.
 
-The ephemeral provider starts or adopts and polls pipelines, validates the underlying
+The ephemeral provider starts or adopts and polls pipelines in the RC account, validates the underlying
 CodeBuild `APPLIED=true` and `APPLIED_SHA` contract, collects CodeBuild logs,
 and invokes the same per-cluster delete actions during teardown.
 

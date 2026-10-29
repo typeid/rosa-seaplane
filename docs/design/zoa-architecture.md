@@ -273,11 +273,11 @@ Operator workflows: [ZOA repo — Boundary](https://github.com/openshift-online/
 
 ### `modules/zoa-access/` — Session Control Plane (RC only)
 
-| Resource       | Details                                                                                                                                                                                                                            |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Access Lambda  | Same `zoa-lambda` image, `HANDLER_MODE=access`, **no VPC attachment**. Function URL with `AWS_IAM` auth (no API Gateway). Manages sessions, RunTask, discovery.                                                                    |
-| Invoker role   | Central-account-trusted role; SREs assume via Central Account to call the Function URL.                                                                                                                                            |
-| SSM parameters | **Central** (`aws.central_deployments` + replica): `/zoa/deployments/<deployment_name>` (Function URL + invoker). **RC**: reads/writes target rows under `TARGETS_SSM_PREFIX` (`/zoa/targets/<deployment>/…`) for `session start`. |
+| Resource       | Details                                                                                                                                                                                                                                                                          |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Access Lambda  | Same `zoa-lambda` image, `HANDLER_MODE=access`, **no VPC attachment**. Function URL with `AWS_IAM` auth (no API Gateway). Manages sessions, RunTask, discovery.                                                                                                                  |
+| Invoker role   | Central-account-trusted role; SREs assume via Central Account to call the Function URL.                                                                                                                                                                                          |
+| SSM parameters | **RC**: `/zoa/deployments/<deployment_name>` (Function URL + invoker), copied to **Central** (primary + replica regions) by `scripts/publish-zoa-discovery.sh`. **RC**: reads/writes target rows under `TARGETS_SSM_PREFIX` (`/zoa/targets/<deployment>/…`) for `session start`. |
 
 The Access Lambda execution role (`aws_iam_role.access_lambda`) is **created** in `zoa-lambda` (RC instance) and **used** by `zoa-access` — this split keeps the trust relationship in the same apply graph as the boundary task definitions it needs to reference.
 
@@ -287,12 +287,12 @@ The Access Lambda execution role (`aws_iam_role.access_lambda`) is **created** i
 - **MC** (`terraform/config/management-cluster/`): `module.zoa_lambda` only — inputs from RC outputs polled in `provision-infra-mc.sh` (Dynamo/S3/KMS/**`zoa_data_access_role_arn`**, sessions table, ECR URL, **`zoa_access_lambda_role_arn`** for boundary task trust, image tags from deploy config). `module.bedrock` also runs on the **MC account** apply (same per-account module, not RC-wired).
 - **Cross-account data plane**: MC `*-zoa-lambda` roles assume RC **`zoa-data-access`** for DynamoDB and S3. Trust requires principals in the configured **MC OU** and an IAM role name suffix **`zoa-lambda`** (wildcard ARN condition), so only per-VPC ZOA Lambda roles qualify — not arbitrary principals in the OU.
 - **SSM discovery (two namespaces)**:
-  - **Central account** (providers `aws.central_deployments` + replica): `/zoa/deployments/<deployment_name>` — Access Function URL + invoker ARN (`module.zoa-access`).
+  - **Central account** (primary + replica regions): `/zoa/deployments/<deployment_name>` — Access Function URL + invoker ARN. `module.zoa-access` writes it in the RC account; `scripts/publish-zoa-discovery.sh` copies it to central, so the RC pipeline has no central access. Interim until discovery no longer needs a central entry.
   - **RC account**: `/zoa/targets/<deployment_name>/<cluster_id>` — boundary target JSON (API URL, ECS ARNs, subnets) for `zoa session start`. RC row: `module.zoa-lambda` on regional cluster. MC rows: combined `scripts/buildspec/provision-cluster.sh` → `scripts/buildspec/provision-mc-zoa-target-ssm.sh` → `terraform/config/mc-zoa-target-ssm-provisioning/` (separate `mc-zoa-target-ssm/<cluster_id>.tfstate` in the **RC account** via child admin role — same idea as kube-applier DynamoDB provisioning, **not** via `zoa-data-access`).
 
 ### AWS cost allocation tags (ZOA)
 
-All ZOA Terraform modules set **`Component=zoa`** and **`function=zoa`** on taggable resources (in addition to provider **`default_tags`**: `app-code`, `service-phase`, `cost-center`, `environment`). Modules: `zoa`, `zoa-lambda`, `zoa-access`. Central-account deployment SSM uses providers **`aws.central_deployments`** and **`aws.central_deployments_replica`** with the same org **`default_tags`**.
+All ZOA Terraform modules set **`Component=zoa`** and **`function=zoa`** on taggable resources (in addition to provider **`default_tags`**: `app-code`, `service-phase`, `cost-center`, `environment`). Modules: `zoa`, `zoa-lambda`, `zoa-access`.
 
 Access Lambda sets **`Component`** and **`function`** on boundary **ECS tasks** at `RunTask` (with session attribution tags). Activate these keys as cost allocation tags in AWS Billing for per-component reports.
 

@@ -67,15 +67,12 @@ if [ "${DELETE_FLAG}" == "true" ]; then
     export TF_VAR_zoa_lambda_ecr_url="000000000000.dkr.ecr.us-east-1.amazonaws.com/placeholder"
     export TF_VAR_zoa_access_lambda_role_arn="arn:aws:iam::000000000000:role/destroy-placeholder"
 else
-    # Assume child admin role in RC account to access state bucket (scoped access instead of org-wide).
+    # RC account credentials for the RC state bucket. MC pipelines run in the
+    # RC account, so this is normally the pipeline's own CodeBuild role.
     _resolve_rc_account
     RESOLVED_REGIONAL_ACCOUNT_ID="${_RESOLVED_RC_ACCOUNT_ID}"
-    echo "Assuming ${CHILD_ADMIN_ROLE_NAME} in RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} for state access..."
-    _rc_creds=$(aws sts assume-role \
-        --role-arn "arn:aws:iam::${RESOLVED_REGIONAL_ACCOUNT_ID}:role/${CHILD_ADMIN_ROLE_NAME}" \
-        --role-session-name "mc-read-rc-state-${MANAGEMENT_ID}" \
-        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-        --output text)
+    echo "Using RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} credentials for state access..."
+    _rc_creds=$(rc_account_credentials "mc-read-rc-state-${MANAGEMENT_ID}")
 
     _RC_CONFIG_FILE=$(config_path_for_mode regional)
     _RC_REGIONAL_ID=$(jq -r '.regional_id // "regional"' "$_RC_CONFIG_FILE" 2>/dev/null || echo "regional")

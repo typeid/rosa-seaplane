@@ -32,13 +32,10 @@ _RC_REGIONAL_ID=$(jq -r '.regional_id // "regional"' "$_RC_CONFIG_FILE" 2>/dev/n
 _RC_STATE_KEY="regional-cluster/${_RC_REGIONAL_ID}.tfstate"
 _RC_TF_DIR="terraform/config/regional-cluster"
 
-# Assume child admin role in RC account to access state bucket (scoped access instead of org-wide).
-echo "Assuming ${CHILD_ADMIN_ROLE_NAME} in RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} for state access..."
-_rc_creds=$(aws sts assume-role \
-    --role-arn "arn:aws:iam::${RESOLVED_REGIONAL_ACCOUNT_ID}:role/${CHILD_ADMIN_ROLE_NAME}" \
-    --role-session-name "mc-read-rc-state-${MANAGEMENT_ID}" \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-    --output text)
+# RC account credentials for the RC state bucket. MC pipelines run in the RC
+# account, so this is normally the pipeline's own CodeBuild role.
+echo "Using RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} credentials for state access..."
+_rc_creds=$(rc_account_credentials "mc-read-rc-state-${MANAGEMENT_ID}")
 AWS_ACCESS_KEY_ID=$(echo "$_rc_creds" | awk '{print $1}') \
 AWS_SECRET_ACCESS_KEY=$(echo "$_rc_creds" | awk '{print $2}') \
 AWS_SESSION_TOKEN=$(echo "$_rc_creds" | awk '{print $3}') \
