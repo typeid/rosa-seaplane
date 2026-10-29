@@ -138,7 +138,7 @@ git push origin <your-branch>
 
 ## 3. Bootstrap the Region and Cluster Pipelines
 
-Switch to your Central AWS profile. Bootstrap applies `terraform/config/region-bootstrap` (connection, IAM roles, artifact bucket, and regional zone in the Regional account) and `terraform/config/region-bootstrap-central` (zone delegation in Central) and invokes `scripts/provision-cluster-resources.sh` to create or update each cluster's CodeBuild project and CodePipeline in the Regional account through AWS APIs. There is no pipeline-provisioner meta-pipeline.
+Switch to your Central AWS profile. Bootstrap applies `terraform/config/region-bootstrap` (connection, IAM roles, and artifact bucket in the Regional account) and `terraform/config/region-dns` (regional zone in the Regional account, delegated from the environment zone in Central) and invokes `scripts/provision-cluster-resources.sh` to create or update each cluster's CodeBuild project and CodePipeline in the Regional account through AWS APIs. There is no pipeline-provisioner meta-pipeline.
 
 ### 3.1 Run the bootstrap script
 

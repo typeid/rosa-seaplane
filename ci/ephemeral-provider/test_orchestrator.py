@@ -90,11 +90,14 @@ def write_rendered_region(work_dir):
         "child_admin_role_name": "OrganizationAccountAccessRole",
         "regional_id": "eph-test-regional",
     }))
+    (deploy_dir / "pipeline-provisioner-inputs" / "terraform.json").write_text(json.dumps({
+        "domain": "ci00.example.com",
+    }))
     (deploy_dir / "pipeline-regional-cluster-inputs" / "terraform.json").write_text(json.dumps({
         "deployment_name": "us-east-1",
     }))
     (work_dir / "terraform" / "config" / "region-bootstrap").mkdir(parents=True)
-    (work_dir / "terraform" / "config" / "region-bootstrap-central").mkdir(parents=True)
+    (work_dir / "terraform" / "config" / "region-dns").mkdir(parents=True)
 
 
 @pytest.mark.parametrize(
@@ -139,12 +142,12 @@ def test_bootstrap_destroy_requires_shared_connection_detached(tmp_path, state_f
         if state_failure in (None, "already_absent"):
             EphemeralEnvOrchestrator._destroy_provisioner(env, git)
             assert destroyed
-            assert "-backend-config=key=eph-test-region-bootstrap-central/eph-test-regional.tfstate" in init_commands[0]
-            assert "-backend-config=bucket=terraform-state-000000000000" in init_commands[0]
+            assert "-backend-config=key=eph-test-region-bootstrap/eph-test-regional.tfstate" in init_commands[0]
+            assert "-backend-config=bucket=terraform-state-111111111111-eu-west-1" in init_commands[0]
             # Both state buckets live in the deployment region, not the central region.
             assert all("-backend-config=region=eu-west-1" in command for command in init_commands)
-            assert "-backend-config=key=eph-test-region-bootstrap/eph-test-regional.tfstate" in init_commands[1]
-            assert "-backend-config=bucket=terraform-state-111111111111-eu-west-1" in init_commands[1]
+            assert "-backend-config=key=eph-test-region-dns/eph-test-regional.tfstate" in init_commands[1]
+            assert "-backend-config=bucket=terraform-state-000000000000" in init_commands[1]
         else:
             with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
                 EphemeralEnvOrchestrator._destroy_provisioner(env, git)

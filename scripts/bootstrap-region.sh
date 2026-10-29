@@ -6,10 +6,10 @@ set -euo pipefail
 # =============================================================================
 # Run from the central account. This script bootstraps a region with:
 # 1. Terraform state infrastructure (S3 bucket with lockfile-based locking)
-# 2. Pipeline infrastructure and the regional DNS zone in the RC account
+# 2. Pipeline infrastructure in the RC account
 #    (terraform/config/region-bootstrap, applied with RC credentials)
-# 3. The regional zone's NS delegation in the central environment zone
-#    (terraform/config/region-bootstrap-central)
+# 3. The regional zone in the RC account, delegated from the central
+#    environment zone (terraform/config/region-dns)
 # 4. The RC and MC CodeBuild projects and CodePipelines, in the RC account
 #
 # Prerequisites:
@@ -246,13 +246,14 @@ CLUSTER_PROJECT_NAMES=$(jq -cn --argjson rc "$REGIONAL_CLUSTER" \
     '[$rc.project_name] + [inputs.management_id]' "${MC_CONFIGS[@]}" </dev/null)
 REGIONAL_ID=$(jq -r '.project_name' <<<"$REGIONAL_CLUSTER")
 RC_ACCOUNT_ID=$(jq -r '.account_id' <<<"$REGIONAL_CLUSTER")
+RC_ADMIN_ROLE_NAME=$(jq -r '.child_admin_role_name' <<<"$REGIONAL_CLUSTER")
 DEPLOYMENT_NAME=$(jq -er '.deployment_name' "${DEPLOY_DIR}/pipeline-regional-cluster-inputs/terraform.json")
 ENVIRONMENT_DOMAIN=$(jq -r '.domain // empty' "${RESOURCE_CONFIG_DIR}/terraform.json" 2>/dev/null || true)
 
 # The region's pipelines live in the RC account. CLI steps below that act there
 # use the child admin role; Terraform assumes it through its provider.
 RC_CREDS=$(aws sts assume-role \
-    --role-arn "arn:aws:iam::${RC_ACCOUNT_ID}:role/$(jq -r '.child_admin_role_name' <<<"$REGIONAL_CLUSTER")" \
+    --role-arn "arn:aws:iam::${RC_ACCOUNT_ID}:role/${RC_ADMIN_ROLE_NAME}" \
     --role-session-name "region-bootstrap-${REGIONAL_ID}" \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
     --output text --no-cli-pager)
@@ -437,13 +438,10 @@ with_rc_account terraform init -reconfigure \
 # configuration values into HCL.
 jq -n --argjson cluster_project_names "$CLUSTER_PROJECT_NAMES" \
     --arg region "$REGION" --arg name_prefix "$NAME_PREFIX" \
-    --arg deployment_name "$DEPLOYMENT_NAME" --arg environment_domain "$ENVIRONMENT_DOMAIN" \
     --argjson enable_slack_notifications "$SLACK_NOTIFICATIONS_ENABLED" \
     --arg slack_webhook_ssm_param "$SLACK_WEBHOOK_SSM_PARAM" \
     '{cluster_project_names: $cluster_project_names,
       region: $region, name_prefix: $name_prefix,
-      deployment_name: $deployment_name,
-      environment_domain: (if $environment_domain == "" then null else $environment_domain end),
       enable_slack_notifications: $enable_slack_notifications,
       slack_webhook_ssm_param: $slack_webhook_ssm_param}' \
     > region-bootstrap.auto.tfvars.json
@@ -488,7 +486,6 @@ GITHUB_CONNECTION_ARN=$(read_required_terraform_output github_connection_arn)
 CODEBUILD_ROLE_ARN=$(read_required_terraform_output codebuild_role_arn)
 CODEPIPELINE_ROLE_ARN=$(read_required_terraform_output codepipeline_role_arn)
 PIPELINE_ARTIFACT_BUCKET=$(read_required_terraform_output codepipeline_artifact_bucket_name)
-REGIONAL_NAME_SERVERS=$(with_rc_account terraform output -json regional_name_servers)
 export GITHUB_CONNECTION_ARN CODEBUILD_ROLE_ARN CODEPIPELINE_ROLE_ARN PIPELINE_ARTIFACT_BUCKET
 export ENVIRONMENT="${TARGET_ENVIRONMENT}"
 export GITHUB_REPOSITORY="${GITHUB_REPOSITORY}"
@@ -496,19 +493,23 @@ export GITHUB_BRANCH="${GITHUB_BRANCH}"
 
 echo ""
 echo "==================================================="
-echo "Step 4: Delegating the Regional Zone (central account)"
+echo "Step 4: Regional DNS Zone (RC account, delegated from central)"
 echo "==================================================="
 
-cd "${REPO_ROOT}/terraform/config/region-bootstrap-central"
-terraform init -reconfigure \
-    -backend-config="bucket=${STATE_BUCKET}" \
-    -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}region-bootstrap-central/${REGIONAL_ID}.tfstate" \
-    -backend-config="region=${REGION}" \
-    -backend-config="use_lockfile=true"
-terraform apply -auto-approve \
-    -var="region=${REGION}" -var="deployment_name=${DEPLOYMENT_NAME}" \
-    ${ENVIRONMENT_DOMAIN:+-var="environment_domain=${ENVIRONMENT_DOMAIN}"} \
-    -var="regional_name_servers=${REGIONAL_NAME_SERVERS}"
+if [[ -n "$ENVIRONMENT_DOMAIN" ]]; then
+    cd "${REPO_ROOT}/terraform/config/region-dns"
+    terraform init -reconfigure \
+        -backend-config="bucket=${STATE_BUCKET}" \
+        -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}region-dns/${REGIONAL_ID}.tfstate" \
+        -backend-config="region=${REGION}" \
+        -backend-config="use_lockfile=true"
+    terraform apply -auto-approve \
+        -var="region=${REGION}" -var="deployment_name=${DEPLOYMENT_NAME}" \
+        -var="environment_domain=${ENVIRONMENT_DOMAIN}" \
+        -var="rc_account_id=${RC_ACCOUNT_ID}" -var="rc_admin_role_name=${RC_ADMIN_ROLE_NAME}"
+else
+    echo "No environment domain configured; skipping the regional zone."
+fi
 
 echo ""
 echo "==================================================="

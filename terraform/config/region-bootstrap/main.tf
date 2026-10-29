@@ -1,9 +1,8 @@
 # =============================================================================
 # Region Bootstrap (RC account)
 #
-# Creates the pipeline infrastructure for the region's RC and MC pipelines and
-# the regional hosted zone. Its central-account counterpart is
-# terraform/config/region-bootstrap-central.
+# Creates the pipeline infrastructure for the region's RC and MC pipelines.
+# The regional hosted zone and its delegation are in terraform/config/region-dns.
 # =============================================================================
 
 # Applied with RC account credentials.

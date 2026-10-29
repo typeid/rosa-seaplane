@@ -54,14 +54,16 @@ cluster can manage MC pipelines in its own account. The RC and MC pipelines
 have no access to the central account.
 
 `scripts/bootstrap-region.sh` runs from the central account once per RC. It
-applies two Terraform roots, each confined to one account:
+applies two independent Terraform roots:
 
 - **`region-bootstrap` (RC account, RC credentials, RC state bucket):** the
   GitHub connection, the `codepipeline-shared` module (artifact bucket,
-  CodePipeline role, one CodeBuild role for all RC and MC projects), failure
-  notifications, and the regional hosted zone.
-- **`region-bootstrap-central` (central account):** the regional zone's NS
-  delegation in the environment zone.
+  CodePipeline role, one CodeBuild role for all RC and MC projects), and
+  failure notifications.
+- **`region-dns` (central credentials, central state bucket):** the regional
+  hosted zone in the RC account and its NS delegation in the central
+  environment zone, through the `delegated-zone` module. The same module can
+  later delegate zone shards in separate accounts from the regional zone.
 
 It also copies the `/infra/*/account_id` SSM parameters referenced by the
 rendered build inputs into the RC account, where the builds resolve them.

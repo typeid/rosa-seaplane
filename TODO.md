@@ -2,8 +2,8 @@
 
 The RC and MC pipelines run in the RC account and no longer access the central
 account. The region bootstrap and the ephemeral provider still do three things
-in central. Each one below can move out, after which `scripts/bootstrap-region.sh`
-only touches the RC account and teardown destroys a single Terraform root.
+in central. Items 1 and 3 can move out; item 2 (DNS delegation) stays by
+design.
 
 "Account bootstrap" below means the account minting Account Bootstrapping
 pipeline (see [Regional Account Minting](docs/design/regional-account-minting.md)),
@@ -44,39 +44,20 @@ The central account ID still reaches the RC Terraform as a plain value
 (`ZOA_CENTRAL_ACCOUNT_ID`), because the ZOA invoker role trusts central's SAML
 roles. That needs no access to central and is out of scope here.
 
-## 2. Move the regional DNS delegation to the account bootstrap
+## 2. DNS delegation stays in the region bootstrap
 
-**Today:** `terraform/config/region-bootstrap` creates the regional hosted zone
-in the RC account, and `terraform/config/region-bootstrap-central` writes its NS
-delegation into the environment zone in central. `bootstrap-region.sh` first
-runs `provision-cluster-resources.sh ensure-environment-zone` so the
-environment zone exists, then passes the zone's name servers from the RC root
-to the central root.
+Decided: the regional zone has to stay in the RC account, and the delegation
+from the central environment zone stays a region bootstrap step rather than
+moving to account minting (its name comes from Seaplane config, and ephemeral
+CI accounts get a new deployment name per run).
 
-**Target:** the account bootstrap delegates DNS to the RC account once, and the
-region bootstrap never writes to central.
-
-- **Standing environments:** the account bootstrap creates
-  `<deployment_name>.<environment_domain>` in the RC account and its NS (and DS,
-  with DNSSEC) record in the environment zone.
-- **Ephemeral environments:** CI RC accounts are reused with a different
-  `deployment_name` per run, so a one-time per-run zone does not fit. Instead,
-  the account bootstrap delegates one zone per RC account (for example
-  `<account-alias>.<environment_domain>`), and the regional zone for each run
-  is created and delegated inside that account zone, within the RC account.
-
-The RC Terraform keeps looking the regional zone up by name, so it does not
-change.
-
-**Removes:**
-
-- `terraform/config/region-bootstrap-central/`
-- the regional zone in `terraform/config/region-bootstrap/dns.tf` and the
-  `regional_name_servers` output (standing environments)
-- the `ensure-environment-zone` action in `scripts/provision-cluster-resources.sh`
-  and its call in `bootstrap-region.sh` (the environment zone itself stays a
-  one-time central setup per environment, `terraform/config/dns-environment-zone`)
-- the central root from the ephemeral provider's `_destroy_provisioner`
+`terraform/config/region-dns` creates both halves through the
+`terraform/modules/delegated-zone` module (zone in the child account, NS record
+in the parent zone, one state). When zone shards move into separate accounts,
+reuse the module per shard with the shard account as child and the RC account
+as parent, and have the RC Terraform look the shard zones up instead of
+creating them. Sharding also needs a DNS writer role per shard account and the
+shard-to-account mapping in seaplane-operator, which this does not cover.
 
 ## 3. Write `/infra/*/account_id` into the RC account in the account bootstrap
 
@@ -99,10 +80,9 @@ so central (or the rendered config) keeps that one value.
 
 ## Result
 
-With all three done:
+With items 1 and 3 done:
 
-- `bootstrap-region.sh` applies one Terraform root in the RC account and creates
-  the pipelines there.
-- Teardown destroys one root, with RC credentials.
+- `bootstrap-region.sh` writes to central only for the DNS delegation
+  (`region-dns`).
 - The only remaining manual steps per RC account are authorizing the GitHub
   connection and adding the CodeBuild role to each MC account's trust policy.

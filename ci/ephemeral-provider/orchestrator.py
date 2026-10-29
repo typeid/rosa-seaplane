@@ -1643,51 +1643,48 @@ class EphemeralEnvOrchestrator:
         )
 
     def _destroy_provisioner(self, git: GitManager):
-        """Destroy the region bootstrap.
+        """Destroy the region bootstrap: the pipeline root, then the DNS root.
 
-        The central root (zone delegation) goes first, then the RC root
-        (pipeline infrastructure and regional zone). The shared GitHub
-        connection is detached from the RC state beforehand so it survives for
-        later runs.
+        The two roots are independent. The shared GitHub connection is detached
+        from the pipeline state beforehand so it survives for later runs.
+        Teardown can run from a fresh checkout, so the variables each root
+        requires are read from the rendered config.
         """
         rendered_dir = git.work_dir / "deploy" / TARGET_ENVIRONMENT / self.region
-        regional_cluster = json.loads(
-            (rendered_dir / "pipeline-provisioner-inputs" / "regional-cluster.json").read_text()
-        )
+        provisioner_dir = rendered_dir / "pipeline-provisioner-inputs"
+        regional_cluster = json.loads((provisioner_dir / "regional-cluster.json").read_text())
+        environment_domain = json.loads((provisioner_dir / "terraform.json").read_text()).get("domain")
         deployment_name = json.loads(
             (rendered_dir / "pipeline-regional-cluster-inputs" / "terraform.json").read_text()
         )["deployment_name"]
         region = regional_cluster["region"]
-        # Teardown can run from a fresh checkout without the bootstrap's
-        # variable files, so pass the variables both roots require.
-        required_vars = [f"-var=region={region}", f"-var=deployment_name={deployment_name}"]
+        state_key = f"{regional_cluster['regional_id']}.tfstate"
 
         config_dir = git.work_dir / "terraform" / "config"
-        central_root = config_dir / "region-bootstrap-central"
-        rc_root = config_dir / "region-bootstrap"
+        pipeline_root = config_dir / "region-bootstrap"
+        dns_root = config_dir / "region-dns"
         central_env = {**os.environ, **self.aws.subprocess_env}
         rc_env = {**os.environ, **self.aws.target_subprocess_env("regional")}
         central_account_id = self.aws.session.client("sts").get_caller_identity()["Account"]
-        state_key = f"{regional_cluster['regional_id']}.tfstate"
 
         def terraform(root: Path, env: dict[str, str], *args: str, **kwargs):
             kwargs.setdefault("timeout", TEARDOWN_TIMEOUT)
             return subprocess.run(["terraform", *args], cwd=root, env=env, check=True, **kwargs)
 
-        try:
+        def init(root: Path, env: dict[str, str], bucket: str, key: str):
             terraform(
-                central_root, central_env, "init", "-reconfigure",
-                f"-backend-config=bucket=terraform-state-{central_account_id}",
-                f"-backend-config=key={git.eph_prefix}-region-bootstrap-central/{state_key}",
+                root, env, "init", "-reconfigure",
+                f"-backend-config=bucket={bucket}",
+                f"-backend-config=key={key}",
                 f"-backend-config=region={region}",
                 "-backend-config=use_lockfile=true",
             )
-            terraform(
-                rc_root, rc_env, "init", "-reconfigure",
-                f"-backend-config=bucket=terraform-state-{regional_cluster['account_id']}-{region}",
-                f"-backend-config=key={git.eph_prefix}-region-bootstrap/{state_key}",
-                f"-backend-config=region={region}",
-                "-backend-config=use_lockfile=true",
+
+        try:
+            # Pipeline infrastructure: RC account, RC credentials.
+            init(
+                pipeline_root, rc_env, f"terraform-state-{regional_cluster['account_id']}-{region}",
+                f"{git.eph_prefix}-region-bootstrap/{state_key}",
             )
 
             # An unsuccessful state removal must never turn into deletion of
@@ -1695,19 +1692,33 @@ class EphemeralEnvOrchestrator:
             connection_resource = "aws_codestarconnections_connection.github"
 
             def connection_in_state():
-                state = terraform(rc_root, rc_env, "state", "list", capture_output=True, text=True, timeout=60)
+                state = terraform(pipeline_root, rc_env, "state", "list", capture_output=True, text=True, timeout=60)
                 return connection_resource in state.stdout.splitlines()
 
             if connection_in_state():
-                terraform(rc_root, rc_env, "state", "rm", connection_resource, timeout=60)
+                terraform(pipeline_root, rc_env, "state", "rm", connection_resource, timeout=60)
             if connection_in_state():
                 raise RuntimeError(
                     "Refusing bootstrap destruction: the shared GitHub connection "
                     "is still managed by this Terraform state"
                 )
+            terraform(pipeline_root, rc_env, "destroy", "-auto-approve", f"-var=region={region}")
 
-            terraform(central_root, central_env, "destroy", "-auto-approve", *required_vars)
-            terraform(rc_root, rc_env, "destroy", "-auto-approve", *required_vars)
+            # Regional zone and its delegation: central credentials, the RC
+            # provider assumes into the RC account.
+            if environment_domain:
+                init(
+                    dns_root, central_env, f"terraform-state-{central_account_id}",
+                    f"{git.eph_prefix}-region-dns/{state_key}",
+                )
+                terraform(
+                    dns_root, central_env, "destroy", "-auto-approve",
+                    f"-var=region={region}",
+                    f"-var=deployment_name={deployment_name}",
+                    f"-var=environment_domain={environment_domain}",
+                    f"-var=rc_account_id={regional_cluster['account_id']}",
+                    f"-var=rc_admin_role_name={regional_cluster['child_admin_role_name']}",
+                )
         except subprocess.TimeoutExpired:
             raise RuntimeError(
                 f"Terraform teardown timed out after {TEARDOWN_TIMEOUT}s"

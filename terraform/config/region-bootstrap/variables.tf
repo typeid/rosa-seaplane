@@ -10,21 +10,10 @@ variable "region" {
   default     = "us-east-1"
 }
 
-variable "deployment_name" {
-  type        = string
-  description = "Regional deployment name (rendered deployment_name). Names the regional zone."
-}
-
 variable "cluster_project_names" {
   type        = list(string)
   description = "Rendered RC and MC project names (used for failure notifications and pipeline permissions)."
   default     = []
-}
-
-variable "environment_domain" {
-  type        = string
-  description = "Environment domain (e.g. int0.rosa.devshift.net). Null skips the regional zone."
-  default     = null
 }
 
 variable "enable_slack_notifications" {

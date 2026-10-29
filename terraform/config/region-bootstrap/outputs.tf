@@ -17,8 +17,3 @@ output "codepipeline_artifact_bucket_name" {
   description = "S3 bucket used by the RC and MC CodePipelines"
   value       = module.codepipeline_shared.artifact_bucket_name
 }
-
-output "regional_name_servers" {
-  description = "Name servers of the regional zone, delegated by region-bootstrap-central"
-  value       = var.environment_domain != null ? aws_route53_zone.regional[0].name_servers : []
-}
