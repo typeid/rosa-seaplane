@@ -446,17 +446,6 @@ jq -n --argjson cluster_project_names "$CLUSTER_PROJECT_NAMES" \
       slack_webhook_ssm_param: $slack_webhook_ssm_param}' \
     > region-bootstrap.auto.tfvars.json
 
-# Import the existing CodeStar connection into terraform state so it can
-# reference the ARN directly (instead of passing it as a variable).
-# The connection is shared across runs and is removed from state before
-# destroy so it persists.
-echo "Importing CodeStar connection into Terraform state..."
-with_rc_account terraform state rm aws_codestarconnections_connection.github >/dev/null 2>&1 || true
-if ! with_rc_account terraform import aws_codestarconnections_connection.github "$GITHUB_CONNECTION_ARN"; then
-    echo "ERROR: Failed to import the existing CodeStar connection; refusing to continue." >&2
-    exit 1
-fi
-
 # Run terraform plan
 echo "Running Terraform plan..."
 with_rc_account terraform plan -out=tfplan
@@ -519,7 +508,8 @@ echo "==================================================="
 cd "${REPO_ROOT}"
 
 echo "Running provision-cluster-resources.sh..."
-./scripts/provision-cluster-resources.sh
+export ZOA_CENTRAL_ACCOUNT_ID="$ACCOUNT_ID"
+with_rc_account ./scripts/provision-cluster-resources.sh
 
 echo ""
 echo "==================================================="

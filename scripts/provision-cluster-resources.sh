@@ -14,32 +14,24 @@
 #   CODEBUILD_ROLE_ARN   - ARN of the CodeBuild role for all RC/MC projects
 #   CODEPIPELINE_ROLE_ARN - ARN of the shared cluster CodePipeline role
 #   PIPELINE_ARTIFACT_BUCKET - S3 bucket used by cluster CodePipelines
+#   ZOA_CENTRAL_ACCOUNT_ID - central account ID (RC projects; ZOA Access trust)
+#
+# Run with the region's RC account credentials: the pipelines and projects are
+# created there. ensure-environment-zone runs with central credentials.
 
 set -euo pipefail
 trap 'echo "FAILED: line $LINENO, exit code $?" >&2' ERR
 
 echo "Provisioning cluster CodeBuild and CodePipeline resources for ${ENVIRONMENT:-staging}"
 
-# CodeBuild/CodePipeline calls run in the region's RC account (see
-# init_pipeline_account); other AWS calls keep the caller's (central)
-# credentials. Match the conditional FIPS endpoint policy of the
-# Terraform-managed pipelines these calls replace.
+# Match the conditional FIPS endpoint policy of the Terraform-managed pipelines
+# these CodeBuild/CodePipeline API calls replace. Other AWS calls keep their
+# service-specific endpoint configuration.
 aws_cluster_pipeline() {
     local region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
     local use_fips=false
     [[ "$region" == us-* ]] && use_fips=true
-    if [[ -z "${_PIPELINE_ACCOUNT_ID:-}" ]]; then
-        echo "ERROR: Pipeline account not selected; call init_pipeline_account first" >&2
-        return 1
-    fi
-    if [[ -n "${_PIPELINE_AWS_ACCESS_KEY_ID:-}" ]]; then
-        AWS_ACCESS_KEY_ID="$_PIPELINE_AWS_ACCESS_KEY_ID" \
-        AWS_SECRET_ACCESS_KEY="$_PIPELINE_AWS_SECRET_ACCESS_KEY" \
-        AWS_SESSION_TOKEN="$_PIPELINE_AWS_SESSION_TOKEN" \
-        AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
-    else
-        AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
-    fi
+    AWS_USE_FIPS_ENDPOINT="$use_fips" aws "$@"
 }
 
 sha256_stdin() {
@@ -158,82 +150,6 @@ resolve_environment_hosted_zone() {
     export ENVIRONMENT_DOMAIN ENVIRONMENT_HOSTED_ZONE_ID TF_STATE_REGION
 }
 
-# Save central credentials for account switching
-_CENTRAL_AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
-_CENTRAL_AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
-_CENTRAL_AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
-
-# Track which target accounts have had state buckets bootstrapped
-BOOTSTRAPPED_ACCOUNTS=""
-
-# Bootstrap state bucket in a target account (idempotent)
-bootstrap_target_state_bucket() {
-    local target_account_id="$1"
-    local target_region="$2"
-
-    init_central_state || return 1
-
-    if echo "$BOOTSTRAPPED_ACCOUNTS" | grep -q "|${target_account_id}|"; then
-        echo "State bucket already bootstrapped for account $target_account_id (skipping)"
-        return 0
-    fi
-
-    if [ "$target_account_id" = "$CENTRAL_ACCOUNT_ID" ]; then
-        ./scripts/bootstrap-state.sh "$target_region" || return 1
-    else
-        local admin_role="${CHILD_ADMIN_ROLE_NAME:-OrganizationAccountAccessRole}"
-        local creds
-        if ! creds=$(aws sts assume-role \
-            --role-arn "arn:aws:iam::${target_account_id}:role/${admin_role}" \
-            --role-session-name "bootstrap-state-${target_account_id}" \
-            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-            --output text 2>&1); then
-            echo "ERROR: Failed to assume ${admin_role} role in account $target_account_id"
-            echo "Error: $creds"
-            return 1
-        fi
-
-        if ! AWS_ACCESS_KEY_ID=$(echo "$creds" | awk '{print $1}') \
-            AWS_SECRET_ACCESS_KEY=$(echo "$creds" | awk '{print $2}') \
-            AWS_SESSION_TOKEN=$(echo "$creds" | awk '{print $3}') \
-            ./scripts/bootstrap-state.sh "$target_region"; then
-            echo "ERROR: Failed to bootstrap Terraform state in account $target_account_id" >&2
-            return 1
-        fi
-    fi
-
-    BOOTSTRAPPED_ACCOUNTS="${BOOTSTRAPPED_ACCOUNTS}|${target_account_id}|"
-}
-
-# All RC and MC pipelines of a region live in its RC account, read from the
-# regional-cluster.json next to the given cluster config. Assumes the RC child
-# admin role unless the caller is already in that account.
-init_pipeline_account() {
-    local rc_config account_id role_name creds
-    rc_config="$(dirname "$1")/regional-cluster.json"
-
-    account_id=$(jq -er '.account_id' "$rc_config") &&
-        account_id=$(resolve_ssm_param "$account_id" "$(jq -er '.region' "$rc_config")") &&
-        role_name=$(jq -er '.child_admin_role_name // "OrganizationAccountAccessRole"' "$rc_config") || {
-        echo "ERROR: Could not read the RC account from $rc_config" >&2
-        return 1
-    }
-    [[ "$account_id" =~ ^[0-9]{12}$ ]] || { echo "ERROR: Invalid RC account in $rc_config" >&2; return 1; }
-    [ "${_PIPELINE_ACCOUNT_ID:-}" = "$account_id" ] && return 0
-
-    # Empty credentials mean the caller is already in the RC account.
-    _PIPELINE_AWS_ACCESS_KEY_ID="" _PIPELINE_AWS_SECRET_ACCESS_KEY="" _PIPELINE_AWS_SESSION_TOKEN=""
-    if [ "$(aws sts get-caller-identity --query Account --output text --no-cli-pager)" != "$account_id" ]; then
-        creds=$(aws sts assume-role \
-            --role-arn "arn:aws:iam::${account_id}:role/${role_name}" \
-            --role-session-name "cluster-pipelines-${account_id}" \
-            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-            --output text --no-cli-pager) || return 1
-        read -r _PIPELINE_AWS_ACCESS_KEY_ID _PIPELINE_AWS_SECRET_ACCESS_KEY _PIPELINE_AWS_SESSION_TOKEN <<< "$creds"
-    fi
-    _PIPELINE_ACCOUNT_ID="$account_id"
-}
-
 # Resolve SSM parameter if value starts with "ssm://"
 resolve_ssm_param() {
     local value="$1"
@@ -296,7 +212,7 @@ generate_project_spec() {
     if [ "$cluster_type" = "regional" ]; then
         env_vars=$(echo "$env_vars" | jq \
             --arg regional_id "${REGIONAL_ID:-}" \
-            --arg central_account_id "${CENTRAL_ACCOUNT_ID:-}" \
+            --arg central_account_id "${ZOA_CENTRAL_ACCOUNT_ID:-}" \
             '. + [
                 {name: "REGIONAL_ID", value: $regional_id, type: "PLAINTEXT"},
                 {name: "ZOA_CENTRAL_ACCOUNT_ID", value: $central_account_id, type: "PLAINTEXT"}
@@ -740,9 +656,10 @@ create_cluster_resource() {
         echo "ERROR: platform_image is missing from $config_path" >&2
         return 1
     fi
-    # Sets CENTRAL_ACCOUNT_ID (the caller) used in the RC project environment.
-    bootstrap_target_state_bucket "$TARGET_ACCOUNT_ID" "$AWS_REGION" || return 1
-    init_pipeline_account "$config_path" || return 1
+    if [ "$cluster_type" = "regional" ] && [[ ! "${ZOA_CENTRAL_ACCOUNT_ID:-}" =~ ^[0-9]{12}$ ]]; then
+        echo "ERROR: ZOA_CENTRAL_ACCOUNT_ID must be the central account ID for the RC project" >&2
+        return 1
+    fi
 
     upsert_project "$cluster_type" "$CLUSTER_PROJECT_ID" "$service_role_arn" \
         "$buildspec_path" "$timeout_minutes" "$CLUSTER_PROJECT_ID" || return 1
@@ -771,7 +688,6 @@ delete_cluster_resource() {
         return 1
     fi
 
-    init_pipeline_account "$config_path" || return 1
     delete_project "$CLUSTER_PROJECT_ID"
 }
 
@@ -804,9 +720,9 @@ Usage:
 The no-argument form processes all rendered RC/MC configs. Explicit actions
 operate on one cluster and are suitable for the MC autoscaler. Explicit create
 actions only create/update resources; the caller starts the pipeline at the
-desired source revision. Pipelines and projects are created in the RC account
-of the cluster's region. ensure-environment-zone creates or looks up the
-environment DNS zone in the calling (central) account.
+desired source revision. Run with the region's RC account credentials.
+ensure-environment-zone creates or looks up the environment DNS zone and runs
+with central credentials.
 EOF
 }
 

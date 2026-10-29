@@ -1,6 +1,6 @@
 output "github_connection_arn" {
   description = "ARN of the GitHub connection in the RC account"
-  value       = aws_codestarconnections_connection.github.arn
+  value       = data.aws_codestarconnections_connection.github.arn
 }
 
 output "codebuild_role_arn" {

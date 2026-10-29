@@ -1536,8 +1536,8 @@ class EphemeralEnvOrchestrator:
         if not script.exists():
             raise FileNotFoundError(f"Cluster resource script not found at {script}")
 
-        env = os.environ.copy()
-        env.update(self.aws.subprocess_env)
+        # Cluster pipelines live in the RC account.
+        env = {**os.environ, **self.aws.target_subprocess_env("regional")}
         env["ENVIRONMENT"] = TARGET_ENVIRONMENT
 
         log.info("Running cluster resource action: %s (%s)", action, config_path)
@@ -1645,10 +1645,10 @@ class EphemeralEnvOrchestrator:
     def _destroy_provisioner(self, git: GitManager):
         """Destroy the region bootstrap: the pipeline root, then the DNS root.
 
-        The two roots are independent. The shared GitHub connection is detached
-        from the pipeline state beforehand so it survives for later runs.
-        Teardown can run from a fresh checkout, so the variables each root
-        requires are read from the rendered config.
+        The two roots are independent. The shared GitHub connection is only
+        looked up by Terraform, so it survives. Teardown can run from a fresh
+        checkout, so the variables each root requires are read from the
+        rendered config.
         """
         rendered_dir = git.work_dir / "deploy" / TARGET_ENVIRONMENT / self.region
         provisioner_dir = rendered_dir / "pipeline-provisioner-inputs"
@@ -1687,21 +1687,6 @@ class EphemeralEnvOrchestrator:
                 f"{git.eph_prefix}-region-bootstrap/{state_key}",
             )
 
-            # An unsuccessful state removal must never turn into deletion of
-            # the shared connection.
-            connection_resource = "aws_codestarconnections_connection.github"
-
-            def connection_in_state():
-                state = terraform(pipeline_root, rc_env, "state", "list", capture_output=True, text=True, timeout=60)
-                return connection_resource in state.stdout.splitlines()
-
-            if connection_in_state():
-                terraform(pipeline_root, rc_env, "state", "rm", connection_resource, timeout=60)
-            if connection_in_state():
-                raise RuntimeError(
-                    "Refusing bootstrap destruction: the shared GitHub connection "
-                    "is still managed by this Terraform state"
-                )
             terraform(pipeline_root, rc_env, "destroy", "-auto-approve", f"-var=region={region}")
 
             # Regional zone and its delegation: central credentials, the RC

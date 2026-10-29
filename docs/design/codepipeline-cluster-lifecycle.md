@@ -106,11 +106,13 @@ associated CodePipeline.
 
 ## Authorization and ownership
 
-Bootstrap reads the rendered cluster descriptors and resolves SSM account IDs.
-The script creates each pipeline and project in the RC account named by the
-`regional-cluster.json` next to the cluster's config. Each MC account's child
-admin role must trust the CodeBuild role ARN; creating another MC in an
-already trusting account does not require a bootstrap rerun.
+The cluster resource script runs with the region's RC account credentials and
+makes no cross-account calls, so the bootstrap, the ephemeral provider, and an
+MC autoscaler in the RC account call it the same way. Each build creates its
+target account's Terraform state bucket (the region bootstrap creates the RC
+account's). Each MC account's child admin role must trust the CodeBuild role
+ARN; creating another MC in an already trusting account does not require a
+bootstrap rerun.
 
 Each cluster CodeBuild project carries
 `ProvisioningScope=<CodePipeline-role-ARN>`. That pipeline role can start, stop,
@@ -125,11 +127,9 @@ authorized so running builds can finish while project definitions are updated.
 These controls preserve the current bootstrap structure. They do not establish
 separate account and environment ownership: deployments that share a pipeline
 role also share its project scope, and same-account provisioning retains the
-infrastructure permissions needed by upstream. The GitHub connection in
-each RC account has Terraform destruction protection and survives ephemeral
-teardown. The
-provider must successfully detach it from that run's bootstrap state before
-destroying the remaining bootstrap resources.
+infrastructure permissions needed by upstream. The bootstrap script creates
+the GitHub connection in each RC account, and Terraform only looks it up, so
+ephemeral teardown never deletes it.
 
 ## Execution
 

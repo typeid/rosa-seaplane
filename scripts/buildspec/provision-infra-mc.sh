@@ -185,6 +185,9 @@ fi
 # provision-cluster.sh registers the MC ZOA target after this step.
 use_mc_account
 
+# The MC account's Terraform state bucket (idempotent).
+./scripts/bootstrap-state.sh "${TARGET_REGION}"
+
 export TF_STATE_BUCKET="terraform-state-${TARGET_ACCOUNT_ID}-${TARGET_REGION}"
 export TF_STATE_KEY="management-cluster/${MANAGEMENT_ID}.tfstate"
 export TF_STATE_REGION="${TARGET_REGION}"
