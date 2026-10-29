@@ -63,14 +63,6 @@ so central (or the rendered config) keeps that one value.
 - the copy loop in `bootstrap-region.sh`
 - the copy note in `docs/design/codepipeline-cluster-lifecycle.md`
 
-## 3. Zone shards in separate accounts
-
-When zone shards move out of the RC account, delegate each one from the
-regional zone with `terraform/modules/delegated-zone` (shard account as child,
-RC account as parent), and have the RC Terraform look the shard zones up
-instead of creating them. This also needs a DNS writer role per shard account
-and the shard-to-account mapping in seaplane-operator.
-
 ## Result
 
 With items 1 and 2 done:
