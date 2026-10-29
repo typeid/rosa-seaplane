@@ -6,7 +6,7 @@ For the current per-cluster pipeline architecture and lifecycle, see [CodePipeli
 
 ### `region-bootstrap/` and `region-dns/`
 
-Applied by `scripts/bootstrap-region.sh` from the central account, once per RC. `region-bootstrap/` runs with RC account credentials and creates the CodeStar connection, the `codepipeline-shared` module (artifact bucket, CodePipeline role, CodeBuild role), and failure notifications. `region-dns/` creates the regional hosted zone in the RC account and its NS delegation in the central environment zone, using the `delegated-zone` module. The connection must be authorized manually in the RC account's AWS Console. `scripts/provision-cluster-resources.sh` dynamically creates one CodePipeline and one CodeBuild project per RC or MC in the RC account.
+Applied by `scripts/bootstrap-region.sh` from the central account, once per RC. `region-bootstrap/` runs with RC account credentials and creates the CodeStar connection, the `codepipeline-shared` module (artifact bucket, CodePipeline role, RC and MC CodeBuild roles), and failure notifications. `region-dns/` creates the regional hosted zone in the RC account and its NS delegation in the central environment zone, using the `delegated-zone` module. The connection must be authorized manually in the RC account's AWS Console. `scripts/provision-cluster-resources.sh` dynamically creates one CodePipeline and one CodeBuild project per RC or MC in the RC account.
 
 ### `codebuild-regional-cluster/` and `codebuild-management-cluster/`
 

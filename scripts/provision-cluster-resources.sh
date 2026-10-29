@@ -11,7 +11,8 @@
 #   GITHUB_REPOSITORY    - GitHub repository in owner/name format
 #   GITHUB_BRANCH        - GitHub branch to track
 #   GITHUB_CONNECTION_ARN - resolved CodeStar connection ARN from bootstrap
-#   CODEBUILD_ROLE_ARN   - ARN of the CodeBuild role for all RC/MC projects
+#   RC_CODEBUILD_ROLE_ARN - ARN of the RC CodeBuild role
+#   MC_CODEBUILD_ROLE_ARN - ARN of the MC CodeBuild role
 #   CODEPIPELINE_ROLE_ARN - ARN of the shared cluster CodePipeline role
 #   PIPELINE_ARTIFACT_BUCKET - S3 bucket used by cluster CodePipelines
 #   ZOA_CENTRAL_ACCOUNT_ID - central account ID (RC projects; ZOA Access trust)
@@ -638,11 +639,12 @@ create_cluster_resource() {
     local region_deployment="$3"
     local service_role_arn buildspec_path timeout_minutes
 
-    service_role_arn="${CODEBUILD_ROLE_ARN:-}"
     if [ "$cluster_type" = "regional" ]; then
+        service_role_arn="${RC_CODEBUILD_ROLE_ARN:-}"
         buildspec_path="terraform/config/codebuild-regional-cluster/buildspec-combined.yml"
         timeout_minutes=90
     else
+        service_role_arn="${MC_CODEBUILD_ROLE_ARN:-}"
         buildspec_path="terraform/config/codebuild-management-cluster/buildspec-combined.yml"
         timeout_minutes=180
     fi

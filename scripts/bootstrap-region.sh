@@ -436,11 +436,14 @@ with_rc_account terraform init -reconfigure \
 
 # Keep resolved descriptors in a JSON variable file rather than interpolating
 # configuration values into HCL.
+CONFIG_PLATFORM_IMAGE=$(jq -er '.platform_image' "${RESOURCE_CONFIG_DIR}/regional-cluster.json")
 jq -n --argjson cluster_project_names "$CLUSTER_PROJECT_NAMES" \
+    --arg regional_id "$REGIONAL_ID" --arg platform_image "$CONFIG_PLATFORM_IMAGE" \
     --arg region "$REGION" --arg name_prefix "$NAME_PREFIX" \
     --argjson enable_slack_notifications "$SLACK_NOTIFICATIONS_ENABLED" \
     --arg slack_webhook_ssm_param "$SLACK_WEBHOOK_SSM_PARAM" \
     '{cluster_project_names: $cluster_project_names,
+      regional_id: $regional_id, platform_image: $platform_image,
       region: $region, name_prefix: $name_prefix,
       enable_slack_notifications: $enable_slack_notifications,
       slack_webhook_ssm_param: $slack_webhook_ssm_param}' \
@@ -472,10 +475,12 @@ read_required_terraform_output() {
 
 # Export terraform outputs for provision-cluster-resources.sh
 GITHUB_CONNECTION_ARN=$(read_required_terraform_output github_connection_arn)
-CODEBUILD_ROLE_ARN=$(read_required_terraform_output codebuild_role_arn)
+RC_CODEBUILD_ROLE_ARN=$(read_required_terraform_output rc_codebuild_role_arn)
+MC_CODEBUILD_ROLE_ARN=$(read_required_terraform_output mc_codebuild_role_arn)
 CODEPIPELINE_ROLE_ARN=$(read_required_terraform_output codepipeline_role_arn)
 PIPELINE_ARTIFACT_BUCKET=$(read_required_terraform_output codepipeline_artifact_bucket_name)
-export GITHUB_CONNECTION_ARN CODEBUILD_ROLE_ARN CODEPIPELINE_ROLE_ARN PIPELINE_ARTIFACT_BUCKET
+export GITHUB_CONNECTION_ARN RC_CODEBUILD_ROLE_ARN MC_CODEBUILD_ROLE_ARN
+export CODEPIPELINE_ROLE_ARN PIPELINE_ARTIFACT_BUCKET
 export ENVIRONMENT="${TARGET_ENVIRONMENT}"
 export GITHUB_REPOSITORY="${GITHUB_REPOSITORY}"
 export GITHUB_BRANCH="${GITHUB_BRANCH}"
@@ -517,7 +522,7 @@ echo "Bootstrap Complete!"
 echo "==================================================="
 echo ""
 echo "CodeBuild projects and CodePipelines have been created in RC account ${RC_ACCOUNT_ID}."
-echo "MC accounts' child admin roles must trust ${CODEBUILD_ROLE_ARN}."
+echo "MC accounts' child admin roles must trust ${MC_CODEBUILD_ROLE_ARN}."
 echo "After the RC pipeline has applied, run scripts/publish-zoa-discovery.sh ${TARGET_ENVIRONMENT} ${REGION}."
 echo "To add more regions, update config/<env>/<region>.yaml and run scripts/render.py."
 echo ""

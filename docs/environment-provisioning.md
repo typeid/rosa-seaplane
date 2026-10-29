@@ -27,7 +27,7 @@ Three accounts are needed:
 - **Management** — hosts the Management Infrastructure (including EKS Management Cluster)
 
 The Regional and Management accounts must allow assume-role from Central, and
-the Management accounts must allow assume-role from the Regional account's
+the Management accounts must allow assume-role from the Regional account's MC
 CodeBuild role (see 1.2).
 
 ### 1.2 Enable assume-role
@@ -54,12 +54,12 @@ aws iam update-assume-role-policy \
 ```
 
 MC pipelines run in the Regional account, so each Management account must also
-trust the Regional account's CodeBuild role (`cluster-codebuild-role`, printed
-at the end of bootstrap). Add it as an exact principal after bootstrap creates
+trust the Regional account's MC CodeBuild role (`mc-codebuild-role`, printed at
+the end of bootstrap). Add it as an exact principal after bootstrap creates
 it:
 
 ```bash
-CODEBUILD_ROLE_ARN="arn:aws:iam::<rc-account-id>:role/cluster-codebuild-role"
+CODEBUILD_ROLE_ARN="arn:aws:iam::<rc-account-id>:role/mc-codebuild-role"
 
 aws iam get-role --role-name $ROLE_NAME --query 'Role.AssumeRolePolicyDocument' --output json | \
   jq --arg role "$CODEBUILD_ROLE_ARN" \

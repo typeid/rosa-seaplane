@@ -25,3 +25,20 @@ variable "cluster_project_names" {
     error_message = "cluster_project_names must contain exact lowercase cluster names without wildcards."
   }
 }
+
+variable "regional_id" {
+  type        = string
+  description = "RC project name (regional_id); scopes the MC role to its seaplane-operator role."
+}
+
+variable "mc_admin_role_names" {
+  type        = list(string)
+  description = "Child admin role names the MC role may assume in MC accounts."
+  default     = ["OrganizationAccountAccessRole", "rosa-seaplane-account-admin"]
+}
+
+variable "platform_image_repository_arn" {
+  type        = string
+  description = "ECR repository of the platform image, when it is in another account."
+  default     = null
+}

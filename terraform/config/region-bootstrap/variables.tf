@@ -10,6 +10,17 @@ variable "region" {
   default     = "us-east-1"
 }
 
+variable "regional_id" {
+  type        = string
+  description = "RC project name (rendered regional_id)"
+}
+
+variable "platform_image" {
+  type        = string
+  description = "Platform container image URI (rendered platform_image)"
+  default     = ""
+}
+
 variable "cluster_project_names" {
   type        = list(string)
   description = "Rendered RC and MC project names (used for failure notifications and pipeline permissions)."

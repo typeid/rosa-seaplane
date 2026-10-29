@@ -3,9 +3,14 @@ output "github_connection_arn" {
   value       = data.aws_codestarconnections_connection.github.arn
 }
 
-output "codebuild_role_arn" {
-  description = "IAM role used by the RC and MC CodeBuild projects. MC accounts' child admin roles must trust it."
-  value       = module.codepipeline_shared.codebuild_role_arn
+output "rc_codebuild_role_arn" {
+  description = "IAM role used by the RC CodeBuild project"
+  value       = module.codepipeline_shared.rc_codebuild_role_arn
+}
+
+output "mc_codebuild_role_arn" {
+  description = "IAM role used by the MC CodeBuild projects. MC accounts' child admin roles must trust it."
+  value       = module.codepipeline_shared.mc_codebuild_role_arn
 }
 
 output "codepipeline_role_arn" {

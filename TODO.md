@@ -70,4 +70,4 @@ With items 1 and 2 done:
 - `bootstrap-region.sh` writes to central only for the DNS delegation
   (`region-dns`).
 - The only remaining manual steps per RC account are authorizing the GitHub
-  connection and adding the CodeBuild role to each MC account's trust policy.
+  connection and adding the MC CodeBuild role to each MC account's trust policy.

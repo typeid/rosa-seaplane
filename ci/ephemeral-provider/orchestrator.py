@@ -1687,7 +1687,10 @@ class EphemeralEnvOrchestrator:
                 f"{git.eph_prefix}-region-bootstrap/{state_key}",
             )
 
-            terraform(pipeline_root, rc_env, "destroy", "-auto-approve", f"-var=region={region}")
+            terraform(
+                pipeline_root, rc_env, "destroy", "-auto-approve",
+                f"-var=region={region}", f"-var=regional_id={regional_cluster['regional_id']}",
+            )
 
             # Regional zone and its delegation: central credentials, the RC
             # provider assumes into the RC account.

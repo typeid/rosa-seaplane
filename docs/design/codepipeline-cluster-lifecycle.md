@@ -58,7 +58,7 @@ applies two independent Terraform roots:
 
 - **`region-bootstrap` (RC account, RC credentials, RC state bucket):** the
   GitHub connection, the `codepipeline-shared` module (artifact bucket,
-  CodePipeline role, one CodeBuild role for all RC and MC projects), and
+  CodePipeline role, and the RC and MC CodeBuild roles), and
   failure notifications.
 - **`region-dns` (central credentials, central state bucket):** the regional
   hosted zone in the RC account and its NS delegation in the central
@@ -75,12 +75,22 @@ has applied (the ephemeral provider runs it automatically). This is an interim
 step: ZOA discovery needs a rework (rosa-seaplane-zoa CLI) so regions no longer
 need a central entry at all.
 
-The CodeBuild role has `AdministratorAccess` in the RC account, matching the
-child admin role the builds used to assume there, and MC builds assume the
-child admin role in each MC account. As a consequence, administrator access to
-the RC account can reach the region's MC accounts through the CodeBuild role.
-Protect the pipeline resources and that role with a service control policy on
-the region OU (owned by account minting).
+The two CodeBuild roles are each narrower than before the move:
+
+- **`rc-codebuild-role`:** `AdministratorAccess` in the RC account (the access
+  RC builds had through the child admin role), no central access, and an
+  explicit deny on assuming roles in any other account.
+- **`mc-codebuild-role`:** only the MC build's RC-side resources (its log
+  group, the artifact bucket, read access to the RC state and write access to
+  the RC-side MC state keys, `/infra/*` reads, the kube-applier DynamoDB
+  tables, the seaplane-operator access policy, `/zoa/targets/*`) and the right
+  to assume MC child admin roles. Previously MC builds had administrator access
+  to the RC account as well.
+
+Only `mc-codebuild-role` can reach MC accounts, whose child admin roles trust
+it. An administrator of the RC account can still run an MC build with a
+different buildspec, so protect the pipelines, projects, and roles with a
+service control policy on the region OU (owned by account minting).
 
 ## Lifecycle contract
 
@@ -110,7 +120,7 @@ The cluster resource script runs with the region's RC account credentials and
 makes no cross-account calls, so the bootstrap, the ephemeral provider, and an
 MC autoscaler in the RC account call it the same way. Each build creates its
 target account's Terraform state bucket (the region bootstrap creates the RC
-account's). Each MC account's child admin role must trust the CodeBuild role
+account's). Each MC account's child admin role must trust the MC CodeBuild role
 ARN; creating another MC in an already trusting account does not require a
 bootstrap rerun.
 

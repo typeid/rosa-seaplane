@@ -18,13 +18,22 @@ data "aws_codestarconnections_connection" "github" {
   name = "rosa-regional-github-shared"
 }
 
+locals {
+  # The platform image is pulled from another account's ECR by the MC role.
+  platform_image_repository = try(regex("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/([^:@]+)", var.platform_image), null)
+}
+
 module "codepipeline_shared" {
   source = "../../modules/codepipeline-shared"
 
   github_connection_arn = data.aws_codestarconnections_connection.github.arn
   name_prefix           = var.name_prefix
   region                = var.region
+  regional_id           = var.regional_id
   cluster_project_names = var.cluster_project_names
+  platform_image_repository_arn = local.platform_image_repository == null ? null : (
+    "arn:aws:ecr:${local.platform_image_repository[1]}:${local.platform_image_repository[0]}:repository/${local.platform_image_repository[2]}"
+  )
 }
 
 # CodeBuild Failure Notifications
