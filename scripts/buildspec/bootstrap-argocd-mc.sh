@@ -32,13 +32,9 @@ _RC_REGIONAL_ID=$(jq -r '.regional_id // "regional"' "$_RC_CONFIG_FILE" 2>/dev/n
 _RC_STATE_KEY="regional-cluster/${_RC_REGIONAL_ID}.tfstate"
 _RC_TF_DIR="terraform/config/regional-cluster"
 
-# RC account credentials for the RC state bucket. MC pipelines run in the RC
-# account, so this is normally the pipeline's own CodeBuild role.
-echo "Using RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} credentials for state access..."
-_rc_creds=$(rc_account_credentials "mc-read-rc-state-${MANAGEMENT_ID}")
-AWS_ACCESS_KEY_ID=$(echo "$_rc_creds" | awk '{print $1}') \
-AWS_SECRET_ACCESS_KEY=$(echo "$_rc_creds" | awk '{print $2}') \
-AWS_SESSION_TOKEN=$(echo "$_rc_creds" | awk '{print $3}') \
+# RC state is read with RC account credentials (the MC pipeline runs in the
+# RC account, so these are the CodeBuild credentials).
+use_rc_account
 terraform -chdir="$_RC_TF_DIR" init -reconfigure \
     -backend-config="bucket=${_RC_STATE_BUCKET}" \
     -backend-config="key=${_RC_STATE_KEY}" \
@@ -49,12 +45,7 @@ _RC_TIMEOUT=1800
 _RC_START=$(date +%s)
 export RHOBS_API_URL=""
 while [ -z "$RHOBS_API_URL" ]; do
-    RHOBS_API_URL=$(
-        AWS_ACCESS_KEY_ID=$(echo "$_rc_creds" | awk '{print $1}') \
-        AWS_SECRET_ACCESS_KEY=$(echo "$_rc_creds" | awk '{print $2}') \
-        AWS_SESSION_TOKEN=$(echo "$_rc_creds" | awk '{print $3}') \
-        terraform -chdir="$_RC_TF_DIR" output -raw rhobs_api_url 2>/dev/null || echo ""
-    )
+    RHOBS_API_URL=$(terraform -chdir="$_RC_TF_DIR" output -raw rhobs_api_url 2>/dev/null || echo "")
     if [ -n "$RHOBS_API_URL" ]; then
         break
     fi

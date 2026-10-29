@@ -13,7 +13,6 @@
 #   use_rc_account           Switch to RC account
 #   use_central_account      Restore central account credentials
 #   get_rc_account_id        Return resolved RC account ID
-#   rc_account_credentials   Print RC account credentials ("key secret token")
 #   get_central_ssm_parameter Read /infra/* SSM from the central (pipeline) account
 #   resolve_management_cluster_account_id  MC account_id from deploy JSON → 12-digit ID
 #   build_management_clusters_tf_var       management_clusters_info JSON → TF_VAR string
@@ -152,25 +151,6 @@ use_central_account() {
 get_rc_account_id() {
     _resolve_rc_account
     echo "$_RESOLVED_RC_ACCOUNT_ID"
-}
-
-# Print RC account credentials as "access-key secret-key session-token" without
-# switching the ambient credentials. Pipelines run in the RC account, so these
-# are normally the CodeBuild credentials themselves.
-rc_account_credentials() {
-    _resolve_rc_account
-    if [ "$_RESOLVED_RC_ACCOUNT_ID" = "$CENTRAL_ACCOUNT_ID" ]; then
-        echo "$_CENTRAL_AWS_ACCESS_KEY_ID $_CENTRAL_AWS_SECRET_ACCESS_KEY $_CENTRAL_AWS_SESSION_TOKEN"
-        return
-    fi
-    AWS_ACCESS_KEY_ID="$_CENTRAL_AWS_ACCESS_KEY_ID" \
-    AWS_SECRET_ACCESS_KEY="$_CENTRAL_AWS_SECRET_ACCESS_KEY" \
-    AWS_SESSION_TOKEN="$_CENTRAL_AWS_SESSION_TOKEN" \
-    aws sts assume-role \
-        --role-arn "arn:aws:iam::${_RESOLVED_RC_ACCOUNT_ID}:role/${CHILD_ADMIN_ROLE_NAME:-OrganizationAccountAccessRole}" \
-        --role-session-name "$1" \
-        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-        --output text
 }
 
 # Read SSM from the CodeBuild (RC) account. The region bootstrap copies the
