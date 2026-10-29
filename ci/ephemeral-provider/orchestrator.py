@@ -1695,7 +1695,7 @@ class EphemeralEnvOrchestrator:
         try:
             self._terraform_init(
                 central_dir, central_env, f"terraform-state-{central_account_id}",
-                f"{git.eph_prefix}-region-bootstrap-central/{regional_id}.tfstate", self.aws.central_region,
+                f"{git.eph_prefix}-region-bootstrap-central/{regional_id}.tfstate", region,
             )
             self._terraform_init(
                 bootstrap_dir, rc_env, f"terraform-state-{rc['account_id']}-{region}",

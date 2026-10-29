@@ -85,7 +85,7 @@ def write_rendered_region(work_dir):
     (deploy_dir / "pipeline-provisioner-inputs").mkdir(parents=True)
     (deploy_dir / "pipeline-regional-cluster-inputs").mkdir(parents=True)
     (deploy_dir / "pipeline-provisioner-inputs" / "regional-cluster.json").write_text(json.dumps({
-        "region": "us-east-1",
+        "region": "eu-west-1",
         "account_id": "111111111111",
         "child_admin_role_name": "OrganizationAccountAccessRole",
         "regional_id": "eph-test-regional",
@@ -141,8 +141,10 @@ def test_bootstrap_destroy_requires_shared_connection_detached(tmp_path, state_f
             assert destroyed
             assert "-backend-config=key=eph-test-region-bootstrap-central/eph-test-regional.tfstate" in init_commands[0]
             assert "-backend-config=bucket=terraform-state-000000000000" in init_commands[0]
+            # Both state buckets live in the deployment region, not the central region.
+            assert all("-backend-config=region=eu-west-1" in command for command in init_commands)
             assert "-backend-config=key=eph-test-region-bootstrap/eph-test-regional.tfstate" in init_commands[1]
-            assert "-backend-config=bucket=terraform-state-111111111111-us-east-1" in init_commands[1]
+            assert "-backend-config=bucket=terraform-state-111111111111-eu-west-1" in init_commands[1]
         else:
             with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
                 EphemeralEnvOrchestrator._destroy_provisioner(env, git)
