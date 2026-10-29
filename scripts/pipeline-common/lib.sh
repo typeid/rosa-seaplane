@@ -119,6 +119,7 @@ print_provision_param_summary() {
 # ── AWS Credentials ──────────────────────────────────────────────────────────
 
 # Capture CodeBuild's ambient credentials. Call once at pipeline start.
+# "Central" here is the account CodeBuild runs in, which is the RC account.
 init_account_helpers() {
     _CENTRAL_AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
     _CENTRAL_AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
@@ -152,7 +153,8 @@ get_rc_account_id() {
     echo "$_RESOLVED_RC_ACCOUNT_ID"
 }
 
-# Read SSM from the central CodeBuild account. /infra/* params live there, not in RC/MC.
+# Read SSM from the CodeBuild (RC) account. The region bootstrap copies the
+# /infra/* account ID parameters the builds resolve into the RC account.
 get_central_ssm_parameter() {
     local param_name="$1"
     AWS_ACCESS_KEY_ID="$_CENTRAL_AWS_ACCESS_KEY_ID" \

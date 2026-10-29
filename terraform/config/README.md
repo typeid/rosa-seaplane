@@ -4,9 +4,9 @@
 
 For the current per-cluster pipeline architecture and lifecycle, see [CodePipeline Cluster Lifecycle](../../docs/design/codepipeline-cluster-lifecycle.md).
 
-### `central-account-bootstrap/`
+### `region-bootstrap/` and `region-dns/`
 
-Creates the shared CodeStar connection, artifact bucket, CodePipeline role, and CodeBuild roles. The connection must be authorized manually in the AWS Console. `scripts/provision-cluster-resources.sh` dynamically creates one CodePipeline and one CodeBuild project per RC or MC.
+Applied by `scripts/bootstrap-region.sh` from the central account, once per RC. `region-bootstrap/` runs with RC account credentials and creates the CodeStar connection, the `codepipeline-shared` module (artifact bucket, CodePipeline role, RC and MC CodeBuild roles), and failure notifications. `region-dns/` creates the regional hosted zone in the RC account and its NS delegation in the central environment zone, using the `delegated-zone` module. The connection must be authorized manually in the RC account's AWS Console. `scripts/provision-cluster-resources.sh` dynamically creates one CodePipeline and one CodeBuild project per RC or MC in the RC account.
 
 ### `codebuild-regional-cluster/` and `codebuild-management-cluster/`
 
@@ -16,7 +16,7 @@ Contain the combined per-cluster buildspecs. Cluster pipeline and CodeBuild defi
 
 ### `regional-cluster/`
 
-Provisions the full regional cluster stack: EKS, VPC, API Gateway, kube-applier DynamoDB tables, RDS (seaplane-db), ECS bootstrap, optional CloudTrail audit logging (disabled by default; enable with `enable_cloudtrail` for compliance environments), and optional bastion.
+Provisions the full regional cluster stack in the RC account (the regional hosted zone itself comes from `region-bootstrap/`): EKS, VPC, API Gateway, kube-applier DynamoDB tables, RDS (seaplane-db), ECS bootstrap, optional CloudTrail audit logging (disabled by default; enable with `enable_cloudtrail` for compliance environments), and optional bastion.
 
 ### `management-cluster/`
 

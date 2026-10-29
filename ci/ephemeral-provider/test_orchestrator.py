@@ -18,6 +18,7 @@ def make_env():
     env.target_monitor.start_pipeline.side_effect = lambda pipeline, *a, **kw: pipeline
     env._delete_cluster_resources = Mock()
     env._destroy_provisioner = Mock()
+    env._publish_zoa_discovery = Mock()
     env.collect_codebuild_logs = Mock()
     return env
 
@@ -79,47 +80,58 @@ def test_failed_teardown_preserves_pipeline_and_bootstrap_resources(failed_proje
     git.delete_eph_branch.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "state_failure",
-    [None, "already_absent", "initial_read", "remove", "verification_read", "still_present"],
-)
-def test_bootstrap_destroy_requires_shared_connection_detached(tmp_path, state_failure):
+def write_rendered_region(work_dir):
+    deploy_dir = work_dir / "deploy" / "ephemeral" / "us-east-1"
+    (deploy_dir / "pipeline-provisioner-inputs").mkdir(parents=True)
+    (deploy_dir / "pipeline-regional-cluster-inputs").mkdir(parents=True)
+    (deploy_dir / "pipeline-provisioner-inputs" / "regional-cluster.json").write_text(json.dumps({
+        "region": "eu-west-1",
+        "account_id": "111111111111",
+        "child_admin_role_name": "OrganizationAccountAccessRole",
+        "regional_id": "eph-test-regional",
+    }))
+    (deploy_dir / "pipeline-provisioner-inputs" / "terraform.json").write_text(json.dumps({
+        "domain": "ci00.example.com",
+    }))
+    (deploy_dir / "pipeline-regional-cluster-inputs" / "terraform.json").write_text(json.dumps({
+        "deployment_name": "us-east-1",
+    }))
+    (work_dir / "terraform" / "config" / "region-bootstrap").mkdir(parents=True)
+    (work_dir / "terraform" / "config" / "region-dns").mkdir(parents=True)
+
+
+def test_bootstrap_destroy_runs_pipeline_and_dns_roots(tmp_path):
     env = make_env()
-    env.aws = Mock(subprocess_env={}, central_region="us-east-1")
+    env.aws = Mock(subprocess_env={"AWS_PROFILE": "central"}, central_region="us-east-1")
+    env.aws.target_subprocess_env.return_value = {"AWS_PROFILE": "rc"}
     env.aws.session.client.return_value.get_caller_identity.return_value = {
         "Account": "000000000000",
     }
     git = Mock(work_dir=tmp_path, eph_prefix="eph-test", fork_repo="owner/repo")
-    connection = "aws_codestarconnections_connection.github"
-    state_reads = 0
-    destroyed = False
+    write_rendered_region(tmp_path)
+    commands = []
 
     def run(command, **kwargs):
-        nonlocal state_reads, destroyed
-        if command[:3] == ["terraform", "state", "list"]:
-            state_reads += 1
-            if state_failure == ("initial_read" if state_reads == 1 else "verification_read"):
-                raise subprocess.CalledProcessError(1, command)
-            present = state_failure != "already_absent" and (
-                state_reads == 1 or state_failure == "still_present"
-            )
-            return subprocess.CompletedProcess(command, 0, stdout=connection if present else "")
-        if command[:3] == ["terraform", "state", "rm"] and state_failure == "remove":
-            if kwargs.get("check"):
-                raise subprocess.CalledProcessError(1, command)
-            return subprocess.CompletedProcess(command, 1)
-        if command[:2] == ["terraform", "destroy"]:
-            destroyed = True
+        commands.append((kwargs["cwd"].name, kwargs["env"]["AWS_PROFILE"], command))
         return subprocess.CompletedProcess(command, 0)
 
     with patch("orchestrator.subprocess.run", side_effect=run):
-        if state_failure in (None, "already_absent"):
-            EphemeralEnvOrchestrator._destroy_provisioner(env, git)
-            assert destroyed
-        else:
-            with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
-                EphemeralEnvOrchestrator._destroy_provisioner(env, git)
-            assert not destroyed
+        EphemeralEnvOrchestrator._destroy_provisioner(env, git)
+
+    assert [(root, profile, command[1]) for root, profile, command in commands] == [
+        ("region-bootstrap", "rc", "init"),
+        ("region-bootstrap", "rc", "destroy"),
+        ("region-dns", "central", "init"),
+        ("region-dns", "central", "destroy"),
+    ]
+    pipeline_init, dns_init = commands[0][2], commands[2][2]
+    # Both state buckets live in the deployment region, not the central region.
+    assert "-backend-config=bucket=terraform-state-111111111111-eu-west-1" in pipeline_init
+    assert "-backend-config=key=eph-test-region-bootstrap/eph-test-regional.tfstate" in pipeline_init
+    assert "-backend-config=bucket=terraform-state-000000000000" in dns_init
+    assert "-backend-config=key=eph-test-region-dns/eph-test-regional.tfstate" in dns_init
+    assert all("-backend-config=region=eu-west-1" in command for _, _, command in commands if command[1] == "init")
+    assert "-var=rc_account_id=111111111111" in commands[3][2]
 
 
 def test_teardown_resync_disables_applies_before_pushing(tmp_path):

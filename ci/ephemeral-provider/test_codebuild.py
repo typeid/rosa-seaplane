@@ -107,7 +107,7 @@ class ClusterProjectLifecycleTest(unittest.TestCase):
         # main provisioning loop or account-bootstrap side effects.
         self.functions = "\n".join(
             function
-            for script in ("provision-cluster-resources.sh", "bootstrap-central-account.sh")
+            for script in ("provision-cluster-resources.sh", "bootstrap-region.sh")
             for function in re.findall(
                 r"^[a-zA-Z_][a-zA-Z_0-9]*\(\) \{\n.*?^\}",
                 (Path(__file__).resolve().parents[2] / "scripts" / script).read_text(),

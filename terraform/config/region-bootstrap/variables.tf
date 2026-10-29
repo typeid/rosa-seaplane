@@ -1,0 +1,40 @@
+variable "name_prefix" {
+  type        = string
+  description = "Optional prefix for resource names (e.g., CI run hash for parallel e2e runs)"
+  default     = ""
+}
+
+variable "region" {
+  type        = string
+  description = "AWS Region for the Pipeline Infrastructure"
+  default     = "us-east-1"
+}
+
+variable "regional_id" {
+  type        = string
+  description = "RC project name (rendered regional_id)"
+}
+
+variable "platform_image" {
+  type        = string
+  description = "Platform container image URI (rendered platform_image)"
+  default     = ""
+}
+
+variable "cluster_project_names" {
+  type        = list(string)
+  description = "Rendered RC and MC project names (used for failure notifications and pipeline permissions)."
+  default     = []
+}
+
+variable "enable_slack_notifications" {
+  type        = bool
+  description = "Enable Slack notifications for CodeBuild failures. When true, slack_webhook_ssm_param must exist in the RC account."
+  default     = false
+}
+
+variable "slack_webhook_ssm_param" {
+  type        = string
+  description = "SSM Parameter Store path (RC account) containing the Slack webhook URL"
+  default     = "/rosa-regional/slack/webhook-url"
+}

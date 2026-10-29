@@ -67,15 +67,10 @@ if [ "${DELETE_FLAG}" == "true" ]; then
     export TF_VAR_zoa_lambda_ecr_url="000000000000.dkr.ecr.us-east-1.amazonaws.com/placeholder"
     export TF_VAR_zoa_access_lambda_role_arn="arn:aws:iam::000000000000:role/destroy-placeholder"
 else
-    # Assume child admin role in RC account to access state bucket (scoped access instead of org-wide).
-    _resolve_rc_account
+    # RC state is read with RC account credentials (the MC pipeline runs in
+    # the RC account, so these are the CodeBuild credentials).
+    use_rc_account
     RESOLVED_REGIONAL_ACCOUNT_ID="${_RESOLVED_RC_ACCOUNT_ID}"
-    echo "Assuming ${CHILD_ADMIN_ROLE_NAME} in RC account ${RESOLVED_REGIONAL_ACCOUNT_ID} for state access..."
-    _rc_creds=$(aws sts assume-role \
-        --role-arn "arn:aws:iam::${RESOLVED_REGIONAL_ACCOUNT_ID}:role/${CHILD_ADMIN_ROLE_NAME}" \
-        --role-session-name "mc-read-rc-state-${MANAGEMENT_ID}" \
-        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-        --output text)
 
     _RC_CONFIG_FILE=$(config_path_for_mode regional)
     _RC_REGIONAL_ID=$(jq -r '.regional_id // "regional"' "$_RC_CONFIG_FILE" 2>/dev/null || echo "regional")
@@ -89,9 +84,6 @@ else
     _RC_STATE_BUCKET="terraform-state-${RESOLVED_REGIONAL_ACCOUNT_ID}-${TARGET_REGION}"
     _RC_STATE_KEY="regional-cluster/${_RC_REGIONAL_ID}.tfstate"
     _RC_TF_DIR="terraform/config/regional-cluster"
-    AWS_ACCESS_KEY_ID=$(echo "$_rc_creds" | awk '{print $1}') \
-    AWS_SECRET_ACCESS_KEY=$(echo "$_rc_creds" | awk '{print $2}') \
-    AWS_SESSION_TOKEN=$(echo "$_rc_creds" | awk '{print $3}') \
     terraform -chdir="$_RC_TF_DIR" init -reconfigure \
         -backend-config="bucket=${_RC_STATE_BUCKET}" \
         -backend-config="key=${_RC_STATE_KEY}" \
@@ -103,11 +95,6 @@ else
     # RC outputs are required for every MC apply.
     # rhobs_api_url is NOT consumed by MC terraform (only re-emitted at outputs.tf);
     # bootstrap-argocd-mc.sh already polls it before ArgoCD bootstrap.
-
-    # Set RC credentials for tf_wait_for_outputs (library reads terraform state)
-    export AWS_ACCESS_KEY_ID=$(echo "$_rc_creds" | awk '{print $1}')
-    export AWS_SECRET_ACCESS_KEY=$(echo "$_rc_creds" | awk '{print $2}')
-    export AWS_SESSION_TOKEN=$(echo "$_rc_creds" | awk '{print $3}')
 
     _RC_REQUIRED_OUTPUTS=(
         oidc_cloudfront_domain
@@ -197,6 +184,9 @@ fi
 # ── Phase 2: Apply/Destroy MC infrastructure ─────────────────────────────────
 # provision-cluster.sh registers the MC ZOA target after this step.
 use_mc_account
+
+# The MC account's Terraform state bucket (idempotent).
+./scripts/bootstrap-state.sh "${TARGET_REGION}"
 
 export TF_STATE_BUCKET="terraform-state-${TARGET_ACCOUNT_ID}-${TARGET_REGION}"
 export TF_STATE_KEY="management-cluster/${MANAGEMENT_ID}.tfstate"

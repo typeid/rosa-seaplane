@@ -2,12 +2,15 @@
 set -euo pipefail
 
 # =============================================================================
-# Bootstrap Central AWS Account
+# Bootstrap a Region
 # =============================================================================
-# This script bootstraps the central AWS account with:
+# Run from the central account. This script bootstraps a region with:
 # 1. Terraform state infrastructure (S3 bucket with lockfile-based locking)
-# 2. Regional cluster CodeBuild infrastructure
-# 3. Management cluster CodeBuild infrastructure
+# 2. Pipeline infrastructure in the RC account
+#    (terraform/config/region-bootstrap, applied with RC credentials)
+# 3. The regional zone in the RC account, delegated from the central
+#    environment zone (terraform/config/region-dns)
+# 4. The RC and MC CodeBuild projects and CodePipelines, in the RC account
 #
 # Prerequisites:
 # - AWS CLI configured with central account credentials
@@ -15,10 +18,10 @@ set -euo pipefail
 # - GitHub repository set up
 #
 # Usage:
-#   GITHUB_REPOSITORY=owner/repo GITHUB_BRANCH=main ./bootstrap-central-account.sh
+#   GITHUB_REPOSITORY=owner/repo GITHUB_BRANCH=main ./bootstrap-region.sh
 #
 #   Or with command-line arguments:
-#   ./bootstrap-central-account.sh owner/repo main staging
+#   ./bootstrap-region.sh owner/repo main staging
 # =============================================================================
 
 # Show usage
@@ -26,7 +29,7 @@ show_usage() {
     cat <<EOF
 Usage: $0 [OPTIONS] [GITHUB_REPOSITORY] [GITHUB_BRANCH] [ENVIRONMENT]
 
-Bootstrap the central AWS account with CodeBuild infrastructure.
+Bootstrap a region's pipeline infrastructure in its RC account.
 
 ARGUMENTS:
     GITHUB_REPOSITORY    GitHub repository in owner/name format (default: 'openshift-online/rosa-seaplane')
@@ -86,7 +89,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "ROSA Seaplane - Central Account Bootstrap"
+echo "ROSA Seaplane - Region Bootstrap"
 echo "======================================================"
 echo ""
 echo "Repository Root: $REPO_ROOT"
@@ -232,16 +235,33 @@ read_cluster_iam_descriptor() {
     jq -c --arg account_id "$target_account_id" '.account_id = $account_id' <<<"$descriptor"
 }
 
-RESOURCE_CONFIG_DIR="${REPO_ROOT}/deploy/${TARGET_ENVIRONMENT}/${REGION}/pipeline-provisioner-inputs"
+DEPLOY_DIR="${REPO_ROOT}/deploy/${TARGET_ENVIRONMENT}/${REGION}"
+RESOURCE_CONFIG_DIR="${DEPLOY_DIR}/pipeline-provisioner-inputs"
 REGIONAL_CLUSTER=$(read_cluster_iam_descriptor "${RESOURCE_CONFIG_DIR}/regional-cluster.json" regional_id)
-MANAGEMENT_CLUSTERS='[]'
-for cluster_config in "${RESOURCE_CONFIG_DIR}"/management-cluster-*.json; do
-    [[ -f "$cluster_config" ]] || continue
-    cluster_descriptor=$(read_cluster_iam_descriptor "$cluster_config" management_id)
-    MANAGEMENT_CLUSTERS=$(jq -cn \
-        --argjson clusters "$MANAGEMENT_CLUSTERS" --argjson cluster "$cluster_descriptor" \
-        '$clusters + [$cluster]')
-done
+# The bootstrap only needs the MC project names (notifications, pipeline role scope).
+shopt -s nullglob
+MC_CONFIGS=("${RESOURCE_CONFIG_DIR}"/management-cluster-*.json)
+shopt -u nullglob
+CLUSTER_PROJECT_NAMES=$(jq -cn --argjson rc "$REGIONAL_CLUSTER" \
+    '[$rc.project_name] + [inputs.management_id]' "${MC_CONFIGS[@]}" </dev/null)
+REGIONAL_ID=$(jq -r '.project_name' <<<"$REGIONAL_CLUSTER")
+RC_ACCOUNT_ID=$(jq -r '.account_id' <<<"$REGIONAL_CLUSTER")
+RC_ADMIN_ROLE_NAME=$(jq -r '.child_admin_role_name' <<<"$REGIONAL_CLUSTER")
+DEPLOYMENT_NAME=$(jq -er '.deployment_name' "${DEPLOY_DIR}/pipeline-regional-cluster-inputs/terraform.json")
+ENVIRONMENT_DOMAIN=$(jq -r '.domain // empty' "${RESOURCE_CONFIG_DIR}/terraform.json" 2>/dev/null || true)
+
+# The region's pipelines live in the RC account. CLI steps below that act there
+# use the child admin role; Terraform assumes it through its provider.
+RC_CREDS=$(aws sts assume-role \
+    --role-arn "arn:aws:iam::${RC_ACCOUNT_ID}:role/${RC_ADMIN_ROLE_NAME}" \
+    --role-session-name "region-bootstrap-${REGIONAL_ID}" \
+    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+    --output text --no-cli-pager)
+with_rc_account() {
+    local key secret token
+    read -r key secret token <<<"$RC_CREDS"
+    env -u AWS_PROFILE AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" AWS_SESSION_TOKEN="$token" "$@"
+}
 
 # Validate repository format (must be owner/name)
 if [[ ! "$GITHUB_REPOSITORY" =~ ^[^/]+/[^/]+$ ]]; then
@@ -267,7 +287,7 @@ if [[ "$SLACK_NOTIFICATIONS_ENABLED" == "true" ]]; then
     # Verify the SSM parameter exists (Lambda will fetch the actual value at runtime)
     echo "Verifying Slack webhook SSM parameter: $SLACK_WEBHOOK_SSM_PARAM"
 
-    if aws ssm get-parameter \
+    if with_rc_account aws ssm get-parameter \
         --name "$SLACK_WEBHOOK_SSM_PARAM" \
         --query 'Parameter.Name' \
         --output text \
@@ -292,6 +312,7 @@ fi
 echo ""
 echo "Configuration:"
 echo "  Central Account ID: $ACCOUNT_ID"
+echo "  RC Account ID:      $RC_ACCOUNT_ID"
 echo "  AWS Region:         $REGION"
 echo "  GitHub Repo:        $GITHUB_REPOSITORY"
 echo "  GitHub Branch:      $GITHUB_BRANCH"
@@ -315,6 +336,10 @@ STATE_BUCKET="terraform-state-${ACCOUNT_ID}"
 
 "${REPO_ROOT}/scripts/bootstrap-state.sh" --central "$REGION"
 
+# The regional zone is delegated from the environment zone, so it must exist first.
+ENVIRONMENT="${TARGET_ENVIRONMENT}" "${REPO_ROOT}/scripts/provision-cluster-resources.sh" \
+    ensure-environment-zone "$REGION"
+
 echo ""
 
 echo "==================================================="
@@ -323,8 +348,8 @@ echo "==================================================="
 
 CODESTAR_CONNECTION_NAME="rosa-regional-github-shared"
 
-# Resolve the centrally-managed connection, creating it when it is missing.
-if ! EXISTING_ARN=$(aws codestar-connections list-connections \
+# Resolve the RC account's connection, creating it when it is missing.
+if ! EXISTING_ARN=$(with_rc_account aws codestar-connections list-connections \
     --provider-type-filter GitHub \
     --query "Connections[?ConnectionName=='${CODESTAR_CONNECTION_NAME}'].ConnectionArn | [0]" \
     --output text --no-cli-pager); then
@@ -337,7 +362,7 @@ if [[ -n "$EXISTING_ARN" && "$EXISTING_ARN" != "None" ]]; then
     GITHUB_CONNECTION_ARN="$EXISTING_ARN"
 else
     echo "Creating CodeStar connection: ${CODESTAR_CONNECTION_NAME}"
-    GITHUB_CONNECTION_ARN=$(aws codestar-connections create-connection \
+    GITHUB_CONNECTION_ARN=$(with_rc_account aws codestar-connections create-connection \
         --provider-type GitHub \
         --connection-name "${CODESTAR_CONNECTION_NAME}" \
         --query "ConnectionArn" \
@@ -347,7 +372,7 @@ else
 fi
 
 # Verify connection is AVAILABLE before proceeding
-CONNECTION_STATUS=$(aws codestar-connections get-connection \
+CONNECTION_STATUS=$(with_rc_account aws codestar-connections get-connection \
     --connection-arn "$GITHUB_CONNECTION_ARN" \
     --query "Connection.ConnectionStatus" \
     --output text --no-cli-pager)
@@ -366,7 +391,7 @@ if [[ "$CONNECTION_STATUS" != "AVAILABLE" ]]; then
     while [[ "$CONNECTION_STATUS" != "AVAILABLE" && "$WAITED" -lt "$MAX_WAIT" ]]; do
         sleep "$POLL_INTERVAL"
         WAITED=$((WAITED + POLL_INTERVAL))
-        CONNECTION_STATUS=$(aws codestar-connections get-connection \
+        CONNECTION_STATUS=$(with_rc_account aws codestar-connections get-connection \
             --connection-arn "$GITHUB_CONNECTION_ARN" \
             --query "Connection.ConnectionStatus" \
             --output text --no-cli-pager)
@@ -381,78 +406,62 @@ fi
 
 echo "CodeStar connection is AVAILABLE"
 
+# RC/MC builds resolve the rendered ssm:///infra/.../account_id references in
+# the RC account, so copy them there.
+for param in $(jq -r '.. | strings | select(test("^ssm:///infra/.*/account_id$")) | ltrimstr("ssm://")' \
+    "${DEPLOY_DIR}"/pipeline-*-inputs/*.json | sort -u); do
+    value=$(aws ssm get-parameter --name "$param" --query 'Parameter.Value' --output text --region "$REGION" --no-cli-pager)
+    with_rc_account aws ssm put-parameter --name "$param" --value "$value" --type String --overwrite \
+        --region "$REGION" --no-cli-pager >/dev/null
+done
+
 echo ""
 echo "==================================================="
-echo "Step 3: Deploying CodeBuild Infrastructure"
+echo "Step 3: Deploying Pipeline Infrastructure (RC account)"
 echo "==================================================="
 
-cd "${REPO_ROOT}/terraform/config/central-account-bootstrap"
+# The RC half of the bootstrap runs entirely with RC credentials and keeps its
+# state in the RC account.
+with_rc_account "${REPO_ROOT}/scripts/bootstrap-state.sh" "$REGION"
+
+cd "${REPO_ROOT}/terraform/config/region-bootstrap"
 
 # Initialize Terraform
 echo "Initializing Terraform..."
-terraform init -reconfigure \
-    -backend-config="bucket=${STATE_BUCKET}" \
-    -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}central-account-bootstrap/terraform.tfstate" \
+with_rc_account terraform init -reconfigure \
+    -backend-config="bucket=terraform-state-${RC_ACCOUNT_ID}-${REGION}" \
+    -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}region-bootstrap/${REGIONAL_ID}.tfstate" \
     -backend-config="region=${REGION}" \
     -backend-config="use_lockfile=true"
 
-# Keep resolved account descriptors in a JSON variable file rather than
-# interpolating configuration values into HCL. Terraform loads it for import,
-# plan, apply, and subsequent teardown from this checkout.
-if ! CONFIG_PLATFORM_IMAGE=$(jq -er '.platform_image // empty' "${RESOURCE_CONFIG_DIR}/regional-cluster.json"); then
-    echo "ERROR: platform_image is missing from ${RESOURCE_CONFIG_DIR}/regional-cluster.json" >&2
-    exit 1
-fi
-jq -n --argjson regional_cluster "$REGIONAL_CLUSTER" \
-    --argjson management_clusters "$MANAGEMENT_CLUSTERS" \
-    --arg platform_image "$CONFIG_PLATFORM_IMAGE" \
-    '{regional_cluster: $regional_cluster, management_clusters: $management_clusters, platform_image: $platform_image}' \
-    > cluster-iam.auto.tfvars.json
-
-# Import the existing CodeStar connection into terraform state so it can
-# reference the ARN directly (instead of passing it as a variable).
-# The connection is shared across runs and is removed from state before
-# destroy so it persists.
-echo "Importing CodeStar connection into Terraform state..."
-terraform state rm aws_codestarconnections_connection.github >/dev/null 2>&1 || true
-if ! terraform import -var="github_repository=${GITHUB_REPOSITORY}" \
-    aws_codestarconnections_connection.github "$GITHUB_CONNECTION_ARN"; then
-    echo "ERROR: Failed to import the existing CodeStar connection; refusing to continue." >&2
-    exit 1
-fi
-
-# Create tfvars file
-cat > terraform.tfvars <<EOF
-github_repository     = "${GITHUB_REPOSITORY}"
-github_branch         = "${GITHUB_BRANCH}"
-region                = "${REGION}"
-environment           = "${TARGET_ENVIRONMENT}"
-name_prefix           = "${NAME_PREFIX}"
-enable_slack_notifications = ${SLACK_NOTIFICATIONS_ENABLED}
-slack_webhook_ssm_param = "${SLACK_WEBHOOK_SSM_PARAM}"
-EOF
-
-echo "Terraform configuration created (terraform.tfvars)"
-echo ""
+# Keep resolved descriptors in a JSON variable file rather than interpolating
+# configuration values into HCL.
+CONFIG_PLATFORM_IMAGE=$(jq -er '.platform_image' "${RESOURCE_CONFIG_DIR}/regional-cluster.json")
+jq -n --argjson cluster_project_names "$CLUSTER_PROJECT_NAMES" \
+    --arg regional_id "$REGIONAL_ID" --arg platform_image "$CONFIG_PLATFORM_IMAGE" \
+    --arg region "$REGION" --arg name_prefix "$NAME_PREFIX" \
+    --argjson enable_slack_notifications "$SLACK_NOTIFICATIONS_ENABLED" \
+    --arg slack_webhook_ssm_param "$SLACK_WEBHOOK_SSM_PARAM" \
+    '{cluster_project_names: $cluster_project_names,
+      regional_id: $regional_id, platform_image: $platform_image,
+      region: $region, name_prefix: $name_prefix,
+      enable_slack_notifications: $enable_slack_notifications,
+      slack_webhook_ssm_param: $slack_webhook_ssm_param}' \
+    > region-bootstrap.auto.tfvars.json
 
 # Run terraform plan
 echo "Running Terraform plan..."
-terraform plan -var-file=terraform.tfvars -out=tfplan
+with_rc_account terraform plan -out=tfplan
 
 echo ""
 echo "Applying Terraform configuration..."
-terraform apply tfplan
-
-echo ""
-echo "==================================================="
-echo "Step 4: Provisioning CodeBuild Projects"
-echo "==================================================="
+with_rc_account terraform apply tfplan
 
 read_required_terraform_output() {
     local output_name="$1"
     local output_value
 
-    if ! output_value=$(terraform output -raw "$output_name"); then
+    if ! output_value=$(with_rc_account terraform output -raw "$output_name"); then
         echo "ERROR: Failed to read required Terraform output '$output_name'" >&2
         return 1
     fi
@@ -470,22 +479,50 @@ RC_CODEBUILD_ROLE_ARN=$(read_required_terraform_output rc_codebuild_role_arn)
 MC_CODEBUILD_ROLE_ARN=$(read_required_terraform_output mc_codebuild_role_arn)
 CODEPIPELINE_ROLE_ARN=$(read_required_terraform_output codepipeline_role_arn)
 PIPELINE_ARTIFACT_BUCKET=$(read_required_terraform_output codepipeline_artifact_bucket_name)
-export GITHUB_CONNECTION_ARN RC_CODEBUILD_ROLE_ARN
-export MC_CODEBUILD_ROLE_ARN CODEPIPELINE_ROLE_ARN PIPELINE_ARTIFACT_BUCKET
+export GITHUB_CONNECTION_ARN RC_CODEBUILD_ROLE_ARN MC_CODEBUILD_ROLE_ARN
+export CODEPIPELINE_ROLE_ARN PIPELINE_ARTIFACT_BUCKET
 export ENVIRONMENT="${TARGET_ENVIRONMENT}"
 export GITHUB_REPOSITORY="${GITHUB_REPOSITORY}"
 export GITHUB_BRANCH="${GITHUB_BRANCH}"
 
+echo ""
+echo "==================================================="
+echo "Step 4: Regional DNS Zone (RC account, delegated from central)"
+echo "==================================================="
+
+if [[ -n "$ENVIRONMENT_DOMAIN" ]]; then
+    cd "${REPO_ROOT}/terraform/config/region-dns"
+    terraform init -reconfigure \
+        -backend-config="bucket=${STATE_BUCKET}" \
+        -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}region-dns/${REGIONAL_ID}.tfstate" \
+        -backend-config="region=${REGION}" \
+        -backend-config="use_lockfile=true"
+    terraform apply -auto-approve \
+        -var="region=${REGION}" -var="deployment_name=${DEPLOYMENT_NAME}" \
+        -var="environment_domain=${ENVIRONMENT_DOMAIN}" \
+        -var="rc_account_id=${RC_ACCOUNT_ID}" -var="rc_admin_role_name=${RC_ADMIN_ROLE_NAME}"
+else
+    echo "No environment domain configured; skipping the regional zone."
+fi
+
+echo ""
+echo "==================================================="
+echo "Step 5: Provisioning CodeBuild Projects (RC account)"
+echo "==================================================="
+
 cd "${REPO_ROOT}"
 
 echo "Running provision-cluster-resources.sh..."
-./scripts/provision-cluster-resources.sh
+export ZOA_CENTRAL_ACCOUNT_ID="$ACCOUNT_ID"
+with_rc_account ./scripts/provision-cluster-resources.sh
 
 echo ""
 echo "==================================================="
 echo "Bootstrap Complete!"
 echo "==================================================="
 echo ""
-echo "CodeBuild projects and CodePipelines have been created for RC/MC clusters."
+echo "CodeBuild projects and CodePipelines have been created in RC account ${RC_ACCOUNT_ID}."
+echo "MC accounts' child admin roles must trust ${MC_CODEBUILD_ROLE_ARN}."
+echo "After the RC pipeline has applied, run scripts/publish-zoa-discovery.sh ${TARGET_ENVIRONMENT} ${REGION}."
 echo "To add more regions, update config/<env>/<region>.yaml and run scripts/render.py."
 echo ""

@@ -12,8 +12,10 @@ config_load regional
 _REPO_BRANCH="${REPOSITORY_BRANCH:-main}"
 
 require_nonempty_vars "RC core runtime" \
-    TARGET_ACCOUNT_ID TARGET_REGION REGIONAL_ID REPOSITORY_URL PLATFORM_IMAGE
+    TARGET_ACCOUNT_ID TARGET_REGION REGIONAL_ID REPOSITORY_URL PLATFORM_IMAGE \
+    ZOA_CENTRAL_ACCOUNT_ID
 validate_aws_account_id "TARGET_ACCOUNT_ID" "${TARGET_ACCOUNT_ID}"
+validate_aws_account_id "ZOA_CENTRAL_ACCOUNT_ID" "${ZOA_CENTRAL_ACCOUNT_ID}"
 tf_require_nonempty_json_vars "${DEPLOY_CONFIG_FILE}" "RC core" \
     regional_id environment deployment_name app_code service_phase cost_center
 tf_require_json_vars "${DEPLOY_CONFIG_FILE}" "RC" \
@@ -70,14 +72,9 @@ _zoa_boundary_image_tag=$(jq -r '.zoa_boundary_image_tag // ""' "$DEPLOY_CONFIG_
 _zoa_boundary_source_image=$(jq -r '.zoa_boundary_source_image // ""' "$DEPLOY_CONFIG_FILE")
 export TF_VAR_zoa_boundary_image="${_zoa_boundary_source_image}:${_zoa_boundary_image_tag}"
 
-# Save central credentials as a named AWS profile so Terraform's aws.central
-# provider can access the central account after use_mc_account switches
-# ambient creds to the target account.
-aws configure set aws_access_key_id     "$_CENTRAL_AWS_ACCESS_KEY_ID"     --profile central
-aws configure set aws_secret_access_key "$_CENTRAL_AWS_SECRET_ACCESS_KEY" --profile central
-aws configure set aws_session_token     "$_CENTRAL_AWS_SESSION_TOKEN"     --profile central
-aws configure set region                "${TARGET_REGION}"                --profile central
-export TF_VAR_central_aws_profile="central"
+# Central account ID for the ZOA Access invoker trust (a value only; the RC
+# build has no access to the central account).
+export TF_VAR_central_account_id="${ZOA_CENTRAL_ACCOUNT_ID}"
 
 # Fetch PagerDuty token if enabled.
 _RAW_PD=$(jq -r '.enable_pagerduty // false' "$DEPLOY_CONFIG_FILE")
@@ -86,7 +83,7 @@ if [ "$_RAW_PD" == "true" ] || [ "$_RAW_PD" == "1" ]; then
     export PAGERDUTY_TOKEN
 fi
 
-# Resolve MC account IDs from central /infra/* while ambient creds are still the CodeBuild (central) role.
+# Resolve MC account IDs from /infra/* while ambient creds are still the CodeBuild role.
 export TF_VAR_management_clusters
 TF_VAR_management_clusters=$(build_management_clusters_tf_var "$DEPLOY_CONFIG_FILE")
 
@@ -149,9 +146,6 @@ export TF_VAR_region_ou_path="${TF_VAR_mc_ou_path}"  # Pass through to terraform
 if [ -n "${ENVIRONMENT_DOMAIN:-}" ]; then
     export TF_VAR_environment_domain="${ENVIRONMENT_DOMAIN}"
 fi
-if [ -n "${ENVIRONMENT_HOSTED_ZONE_ID:-}" ]; then
-    export TF_VAR_environment_hosted_zone_id="${ENVIRONMENT_HOSTED_ZONE_ID}"
-fi
 
 export ENVIRONMENT="${ENVIRONMENT:-staging}"
 
@@ -173,6 +167,7 @@ print_provision_param_summary "RC" \
     "PLATFORM_IMAGE" "runtime" "${PLATFORM_IMAGE}" \
     "TF_VAR_management_clusters" "derived" "${TF_VAR_management_clusters}" \
     "TF_VAR_region_ou_path" "SSM" "${TF_VAR_region_ou_path}" \
+    "ZOA_CENTRAL_ACCOUNT_ID" "runtime" "${ZOA_CENTRAL_ACCOUNT_ID}" \
     "zoa_lambda_image_tag" "config" "${_ZOA_LAMBDA_IMAGE_TAG}" \
     "zoa_runner_image_tag" "config" "${_ZOA_RUNNER_IMAGE_TAG}" \
     "TF_STATE_BUCKET" "runtime" "${TF_STATE_BUCKET}" \

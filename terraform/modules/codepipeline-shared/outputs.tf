@@ -12,3 +12,13 @@ output "pipeline_role_arn" {
   description = "IAM role assumed by per-cluster CodePipelines."
   value       = aws_iam_role.pipeline.arn
 }
+
+output "rc_codebuild_role_arn" {
+  description = "IAM role used by the RC CodeBuild project."
+  value       = aws_iam_role.rc_codebuild.arn
+}
+
+output "mc_codebuild_role_arn" {
+  description = "IAM role used by the MC CodeBuild projects. MC accounts' child admin roles must trust it."
+  value       = aws_iam_role.mc_codebuild.arn
+}

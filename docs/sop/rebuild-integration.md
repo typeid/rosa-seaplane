@@ -6,8 +6,9 @@ This procedure assumes the environment already uses the [current per-cluster Cod
 
 ## Prerequisites
 
-1. AWS Console access to the **central account** (hosts CodePipeline)
-2. AWS Console or CLI access to the **RC and MC target accounts** (for manual cleanup of leftover resources)
+1. AWS Console access to the **RC account** (hosts the RC and MC CodePipelines)
+2. AWS CLI access to the **central account** (runs the region bootstrap)
+3. AWS Console or CLI access to the **RC and MC target accounts** (for manual cleanup of leftover resources)
 
 ## Procedure
 
@@ -16,7 +17,7 @@ The rebuild follows a teardown-then-provision cycle. MC must be torn down before
 ```mermaid
 sequenceDiagram
     participant Operator
-    participant Console as AWS Console<br/>(Central Account)
+    participant Console as AWS Console<br/>(RC Account)
     participant MC as MC Pipeline<br/>(mc01-pipeline)
     participant RC as RC Pipeline<br/>(regional-pipeline)
     Operator->>Console: Start MC pipeline (IS_DESTROY=true)
@@ -40,7 +41,7 @@ sequenceDiagram
 
 ### Step 1: Tear down the Management Cluster
 
-1. Open the [AWS CodePipeline console](https://console.aws.amazon.com/codesuite/codepipeline/pipelines) in the **central account**.
+1. Open the [AWS CodePipeline console](https://console.aws.amazon.com/codesuite/codepipeline/pipelines) in the **RC account**.
 
 2. Find the MC pipeline: `mc01-pipeline`. Suspend source-triggered executions during the rebuild so a push cannot race with teardown.
 
@@ -83,7 +84,7 @@ If the teardown failed more broadly, also check for other leaked resources (ENIs
 Reconcile the current cluster definitions and provision RC and MC while their
 source push triggers remain disabled. Keep the integration repository, branch,
 environment, and rendered resource-prefix configuration unchanged. Add only
-`ENABLE_CODEPIPELINE_PUSH_TRIGGERS=false` to the existing central-bootstrap
+`ENABLE_CODEPIPELINE_PUSH_TRIGGERS=false` to the existing region-bootstrap
 command:
 
 ```bash
@@ -91,7 +92,7 @@ ENABLE_CODEPIPELINE_PUSH_TRIGGERS=false \
 GITHUB_REPOSITORY="<existing-owner>/rosa-seaplane" \
 GITHUB_BRANCH="<existing-branch>" \
 TARGET_ENVIRONMENT=integration \
-./scripts/bootstrap-central-account.sh
+./scripts/bootstrap-region.sh
 ```
 
 Replace the repository and branch placeholders with the values used by the
@@ -107,7 +108,7 @@ the RC and MC pipelines with push triggers disabled.
 
    If provisioning fails due to leftover resources from Step 3, delete the conflicting resources and re-trigger the failed pipeline.
 
-4. After both pipelines succeed, rerun the same central-bootstrap command with
+4. After both pipelines succeed, rerun the same region-bootstrap command with
    `ENABLE_CODEPIPELINE_PUSH_TRIGGERS=true` and the same repository, branch,
    environment, and rendered resource-prefix configuration. This restores the
    normal push-trigger behavior.

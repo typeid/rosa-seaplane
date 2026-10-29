@@ -1,6 +1,6 @@
 # ZOA Access module (RC only)
 
-Session control plane: Access Lambda (`HANDLER_MODE=access`), Function URL (IAM auth), central-trusted invoker role, deployment discovery SSM in the **Central account** at `/zoa/deployments/<deployment_name>` (**primary + replica** SSM regions from regional-cluster config).
+Session control plane: Access Lambda (`HANDLER_MODE=access`), Function URL (IAM auth), central-trusted invoker role, deployment discovery SSM at `/zoa/deployments/<deployment_name>` in the RC account, copied to the **Central account** (primary + replica SSM regions) by `scripts/publish-zoa-discovery.sh`.
 
 ## Access Lambda execution role (split with `zoa-lambda`)
 

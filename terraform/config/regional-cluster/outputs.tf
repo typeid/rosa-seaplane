@@ -187,7 +187,7 @@ output "api_test_command" {
 
 output "regional_hosted_zone_id" {
   description = "Route53 hosted zone ID for the regional domain (e.g. us-east-1.int0.rosa.devshift.net)"
-  value       = var.environment_domain != null ? aws_route53_zone.regional[0].zone_id : null
+  value       = var.environment_domain != null ? data.aws_route53_zone.regional[0].zone_id : null
 }
 
 output "regional_domain" {
@@ -197,7 +197,7 @@ output "regional_domain" {
 
 output "regional_name_servers" {
   description = "NS records for the regional zone"
-  value       = var.environment_domain != null ? aws_route53_zone.regional[0].name_servers : null
+  value       = var.environment_domain != null ? data.aws_route53_zone.regional[0].name_servers : null
 }
 
 

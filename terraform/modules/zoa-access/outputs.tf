@@ -28,11 +28,6 @@ output "lambda_function_name" {
 }
 
 output "ssm_parameter_arn" {
-  description = "ARN of the primary SSM deployment discovery parameter"
+  description = "ARN of the SSM deployment discovery parameter (RC account)"
   value       = aws_ssm_parameter.deployment.arn
-}
-
-output "ssm_parameter_replica_arn" {
-  description = "ARN of the replica SSM deployment discovery parameter"
-  value       = aws_ssm_parameter.deployment_replica.arn
 }

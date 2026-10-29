@@ -1,6 +1,6 @@
 # Provision a New Environment
 
-Set up shared central resources and one CodePipeline with a combined CodeBuild worker per Regional or Management Cluster. The cluster builds provision infrastructure, bootstrap ArgoCD, and establish kube-applier connectivity.
+Bootstrap each region from the central account: pipeline infrastructure and the regional DNS zone in the Regional account, and one CodePipeline with a combined CodeBuild worker per Regional or Management Cluster, also in the Regional account. The cluster builds provision infrastructure, bootstrap ArgoCD, and establish kube-applier connectivity.
 
 For an existing environment using Terraform-managed pipelines, review [migration from the previous pipeline architecture](design/codepipeline-cluster-lifecycle.md#migration-from-terraform-managed-pipelines) before running bootstrap.
 
@@ -22,18 +22,13 @@ jq --version
 
 Three accounts are needed:
 
-- **Central** — hosts the CodePipeline infrastructure
-- **Regional** — hosts the Regional Infrastructure (including EKS Regional Cluster)
+- **Central** — runs the region bootstrap; holds the environment DNS zone and `/infra/*` account IDs
+- **Regional** — hosts the Regional Infrastructure (including EKS Regional Cluster) and the region's RC and MC CodePipelines
 - **Management** — hosts the Management Infrastructure (including EKS Management Cluster)
 
-The Regional and Management accounts must allow assume-role from Central (see 1.2).
-
-Bootstrap authorizes the exact account IDs and `aws.child_admin_role_name` from
-the rendered configuration, resolving SSM account references in the Central
-account. The RC worker can assume its configured Regional account role; MC
-workers can assume the configured Management account roles and the Regional
-account role needed for RC state, RC-side MC resources, and cleanup. Update the configuration and
-rerun bootstrap before using a new target account or administrator role.
+The Regional and Management accounts must allow assume-role from Central, and
+the Management accounts must allow assume-role from the Regional account's MC
+CodeBuild role (see 1.2).
 
 ### 1.2 Enable assume-role
 
@@ -56,6 +51,24 @@ aws iam update-assume-role-policy \
   --policy-document file:///tmp/trust-policy-updated.json
 
 # Repeat for the Management account (switch credentials first)
+```
+
+MC pipelines run in the Regional account, so each Management account must also
+trust the Regional account's MC CodeBuild role (`mc-codebuild-role`, printed at
+the end of bootstrap). Add it as an exact principal after bootstrap creates
+it:
+
+```bash
+CODEBUILD_ROLE_ARN="arn:aws:iam::<rc-account-id>:role/mc-codebuild-role"
+
+aws iam get-role --role-name $ROLE_NAME --query 'Role.AssumeRolePolicyDocument' --output json | \
+  jq --arg role "$CODEBUILD_ROLE_ARN" \
+  '.Statement += [{Effect: "Allow", Principal: {AWS: $role}, Action: "sts:AssumeRole"}]' \
+  > /tmp/trust-policy-updated.json
+
+aws iam update-assume-role-policy \
+  --role-name $ROLE_NAME \
+  --policy-document file:///tmp/trust-policy-updated.json
 ```
 
 ## 2. Configure the Region
@@ -123,9 +136,9 @@ git push origin <your-branch>
 
 ---
 
-## 3. Bootstrap Central Resources and Cluster Pipelines
+## 3. Bootstrap the Region and Cluster Pipelines
 
-Switch to your Central AWS profile. Bootstrap applies Terraform for shared resources (connection, IAM roles, and artifact bucket) and invokes `scripts/provision-cluster-resources.sh` to create or update each cluster's CodeBuild project and CodePipeline through AWS APIs. There is no pipeline-provisioner meta-pipeline.
+Switch to your Central AWS profile. Bootstrap applies `terraform/config/region-bootstrap` (connection, IAM roles, and artifact bucket in the Regional account) and `terraform/config/region-dns` (regional zone in the Regional account, delegated from the environment zone in Central) and invokes `scripts/provision-cluster-resources.sh` to create or update each cluster's CodeBuild project and CodePipeline in the Regional account through AWS APIs. There is no pipeline-provisioner meta-pipeline.
 
 ### 3.1 Run the bootstrap script
 
@@ -135,7 +148,7 @@ export AWS_PROFILE=<central-profile>
 GITHUB_REPOSITORY=<org>/rosa-seaplane \
 GITHUB_BRANCH=<branch> \
 TARGET_ENVIRONMENT=<environment> \
-./scripts/bootstrap-central-account.sh
+./scripts/bootstrap-region.sh
 ```
 
 Defaults to `openshift-online/rosa-seaplane` on `main` if not specified.
@@ -144,7 +157,7 @@ Defaults to `openshift-online/rosa-seaplane` on `main` if not specified.
 
 The bootstrap script creates a CodeStar connection and polls until it becomes AVAILABLE. While it waits:
 
-1. Open the [AWS CodeStar Connections console](https://console.aws.amazon.com/codesuite/settings/connections) in the Central account
+1. Open the [AWS CodeStar Connections console](https://console.aws.amazon.com/codesuite/settings/connections) in the Regional account
 2. Find the **Pending** connection and click **Update pending connection**
 3. Click **Install a new app**, then install the GitHub App on the repository you are targeting — this is required for the GitOps pipeline triggers to pick up changes
 
@@ -164,6 +177,17 @@ Cluster build logs are grouped under
 `/aws/codebuild/<pipeline-role-name>/regional` or
 `/aws/codebuild/<pipeline-role-name>/management` in CloudWatch. Use the build's log
 stream to distinguish individual clusters and executions.
+
+### 3.4 Publish ZOA discovery
+
+After the RC pipeline has applied, copy its ZOA discovery entry to the Central
+account so the `zoa` CLI can find the region (Central credentials):
+
+```bash
+./scripts/publish-zoa-discovery.sh <environment> <region>
+```
+
+This is interim until ZOA discovery no longer needs a central entry.
 
 ## 4. Verification
 
@@ -257,10 +281,10 @@ awscurl -X POST $API_GATEWAY_URL/api/v0/accounts \
 
 ### Trigger pipelines via CLI
 
-Pipelines are triggered automatically by Git pushes, but you can also trigger them manually. Requires Central account credentials.
+Pipelines are triggered automatically by Git pushes, but you can also trigger them manually. Requires Regional account credentials.
 
 ```bash
-export AWS_PROFILE=<central-profile>
+export AWS_PROFILE=<regional-profile>
 
 # List available pipelines
 aws codepipeline list-pipelines \

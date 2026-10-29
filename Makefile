@@ -175,12 +175,7 @@ check-docs: ## Check documentation formatting
 	@npx --no-install prettier --check '**/*.md'
 	@echo "✅ Documentation formatting check complete"
 
-# central-account-bootstrap (shared connection/state) is excluded from tag
-# enforcement; the CodePipeline modules are tagged and linted normally.
-TFLINT_EXCLUDE_DIRS := \
-	./terraform/config/central-account-bootstrap
-
-TFLINT_DIRS := $(filter-out $(TFLINT_EXCLUDE_DIRS),$(TERRAFORM_DIRS))
+TFLINT_DIRS := $(TERRAFORM_DIRS)
 
 check-default-tags: ## Check all AWS resources have required tags (function, module)
 	@echo "🔍 Checking AWS resource tag coverage..."

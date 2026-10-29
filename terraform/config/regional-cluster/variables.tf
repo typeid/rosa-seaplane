@@ -47,10 +47,13 @@ variable "target_account_id" {
   default     = ""
 }
 
-variable "central_aws_profile" {
-  description = "AWS CLI profile for central account credentials. Pipelines set this to \"central\" (buildspec writes profile from CodeBuild home creds). Required for cross-account central SSM and ZOA Access invoker trust account ID."
+variable "central_account_id" {
+  description = "Central account ID, whose SAML roles the ZOA Access invoker role trusts. Only used as a value; the RC pipeline has no access to it. Pipelines set it from the CodeBuild environment."
   type        = string
-  default     = ""
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.central_account_id))
+    error_message = "central_account_id must be a 12-digit AWS account ID."
+  }
 }
 
 variable "zoa_access_trusted_assumer_role_names" {
@@ -69,7 +72,7 @@ variable "zoa_access_trusted_assumer_role_name_suffixes" {
     App-interface access role name suffixes only (the role-1.yml name field), not the full IAM role name.
     App-interface provisions SAML hub roles in central as "<central_account_id>-<suffix>"; we avoid hardcoding
     the account ID in environment config by listing suffixes here and expanding to full role names at RC apply
-    using data.aws_caller_identity.central. Optional in config; at least one name or suffix required at apply.
+    using var.central_account_id. Optional in config; at least one name or suffix required at apply.
     Expanded roles must exist in the central account.
   EOT
   type        = list(string)
@@ -554,18 +557,6 @@ variable "zoa_lambda_access_concurrency" {
     condition     = var.zoa_lambda_access_concurrency == -1 || var.zoa_lambda_access_concurrency >= 1
     error_message = "zoa_lambda_access_concurrency must be -1 (unreserved) or >= 1; 0 disables the Lambda."
   }
-}
-
-variable "zoa_central_deployments_primary_region" {
-  description = "Central account SSM region for primary /zoa/deployments/* (must match rosa-seaplane-zoa accessclient.DefaultDeploymentsSSMRegion)."
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "zoa_central_deployments_replica_region" {
-  description = "Central account SSM region for replica /zoa/deployments/* (must match rosa-seaplane-zoa accessclient.ReplicaDeploymentsSSMRegion)."
-  type        = string
-  default     = "eu-west-1"
 }
 
 variable "worker_node_ami_id" {
