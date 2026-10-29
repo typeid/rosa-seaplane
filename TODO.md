@@ -1,9 +1,9 @@
 # TODO: Remove the Remaining Central-Account Steps from the Region Bootstrap
 
 The RC and MC pipelines run in the RC account and no longer access the central
-account. The region bootstrap and the ephemeral provider still do three things
-in central. Items 1 and 3 can move out; item 2 (DNS delegation) stays by
-design.
+account. The region bootstrap and the ephemeral provider still do two things in
+central that can move out. The regional DNS delegation (`region-dns`) stays a
+central step by design.
 
 "Account bootstrap" below means the account minting Account Bootstrapping
 pipeline (see [Regional Account Minting](docs/design/regional-account-minting.md)),
@@ -44,22 +44,7 @@ The central account ID still reaches the RC Terraform as a plain value
 (`ZOA_CENTRAL_ACCOUNT_ID`), because the ZOA invoker role trusts central's SAML
 roles. That needs no access to central and is out of scope here.
 
-## 2. DNS delegation stays in the region bootstrap
-
-Decided: the regional zone has to stay in the RC account, and the delegation
-from the central environment zone stays a region bootstrap step rather than
-moving to account minting (its name comes from Seaplane config, and ephemeral
-CI accounts get a new deployment name per run).
-
-`terraform/config/region-dns` creates both halves through the
-`terraform/modules/delegated-zone` module (zone in the child account, NS record
-in the parent zone, one state). When zone shards move into separate accounts,
-reuse the module per shard with the shard account as child and the RC account
-as parent, and have the RC Terraform look the shard zones up instead of
-creating them. Sharding also needs a DNS writer role per shard account and the
-shard-to-account mapping in seaplane-operator, which this does not cover.
-
-## 3. Write `/infra/*/account_id` into the RC account in the account bootstrap
+## 2. Write `/infra/*/account_id` into the RC account in the account bootstrap
 
 **Today:** rendered configs reference account IDs as
 `ssm:///infra/<env>/<region>/.../account_id`. Operators store them in central
@@ -78,9 +63,17 @@ so central (or the rendered config) keeps that one value.
 - the copy loop in `bootstrap-region.sh`
 - the copy note in `docs/design/codepipeline-cluster-lifecycle.md`
 
+## 3. Zone shards in separate accounts
+
+When zone shards move out of the RC account, delegate each one from the
+regional zone with `terraform/modules/delegated-zone` (shard account as child,
+RC account as parent), and have the RC Terraform look the shard zones up
+instead of creating them. This also needs a DNS writer role per shard account
+and the shard-to-account mapping in seaplane-operator.
+
 ## Result
 
-With items 1 and 3 done:
+With items 1 and 2 done:
 
 - `bootstrap-region.sh` writes to central only for the DNS delegation
   (`region-dns`).
