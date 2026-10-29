@@ -238,14 +238,12 @@ read_cluster_iam_descriptor() {
 DEPLOY_DIR="${REPO_ROOT}/deploy/${TARGET_ENVIRONMENT}/${REGION}"
 RESOURCE_CONFIG_DIR="${DEPLOY_DIR}/pipeline-provisioner-inputs"
 REGIONAL_CLUSTER=$(read_cluster_iam_descriptor "${RESOURCE_CONFIG_DIR}/regional-cluster.json" regional_id)
-MANAGEMENT_CLUSTERS='[]'
-for cluster_config in "${RESOURCE_CONFIG_DIR}"/management-cluster-*.json; do
-    [[ -f "$cluster_config" ]] || continue
-    cluster_descriptor=$(read_cluster_iam_descriptor "$cluster_config" management_id)
-    MANAGEMENT_CLUSTERS=$(jq -cn \
-        --argjson clusters "$MANAGEMENT_CLUSTERS" --argjson cluster "$cluster_descriptor" \
-        '$clusters + [$cluster]')
-done
+# The bootstrap only needs the MC project names (notifications, pipeline role scope).
+shopt -s nullglob
+MC_CONFIGS=("${RESOURCE_CONFIG_DIR}"/management-cluster-*.json)
+shopt -u nullglob
+CLUSTER_PROJECT_NAMES=$(jq -cn --argjson rc "$REGIONAL_CLUSTER" \
+    '[$rc.project_name] + [inputs.management_id]' "${MC_CONFIGS[@]}" </dev/null)
 REGIONAL_ID=$(jq -r '.project_name' <<<"$REGIONAL_CLUSTER")
 RC_ACCOUNT_ID=$(jq -r '.account_id' <<<"$REGIONAL_CLUSTER")
 DEPLOYMENT_NAME=$(jq -er '.deployment_name' "${DEPLOY_DIR}/pipeline-regional-cluster-inputs/terraform.json")
@@ -437,13 +435,12 @@ with_rc_account terraform init -reconfigure \
 
 # Keep resolved descriptors in a JSON variable file rather than interpolating
 # configuration values into HCL.
-jq -n --argjson regional_cluster "$REGIONAL_CLUSTER" \
-    --argjson management_clusters "$MANAGEMENT_CLUSTERS" \
+jq -n --argjson cluster_project_names "$CLUSTER_PROJECT_NAMES" \
     --arg region "$REGION" --arg name_prefix "$NAME_PREFIX" \
     --arg deployment_name "$DEPLOYMENT_NAME" --arg environment_domain "$ENVIRONMENT_DOMAIN" \
     --argjson enable_slack_notifications "$SLACK_NOTIFICATIONS_ENABLED" \
     --arg slack_webhook_ssm_param "$SLACK_WEBHOOK_SSM_PARAM" \
-    '{cluster_project_names: ([$regional_cluster] + $management_clusters | map(.project_name)),
+    '{cluster_project_names: $cluster_project_names,
       region: $region, name_prefix: $name_prefix,
       deployment_name: $deployment_name,
       environment_domain: (if $environment_domain == "" then null else $environment_domain end),
