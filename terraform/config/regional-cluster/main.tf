@@ -341,10 +341,10 @@ module "rhobs_api_gateway" {
 # =============================================================================
 # Regional DNS Zone (Optional)
 #
-# The region bootstrap (terraform/config/region-bootstrap) creates the regional
-# hosted zone (<deployment_name>.<environment_domain>) in the RC account and its
-# delegation in the central environment zone. The RC Terraform only looks the
-# zone up and owns everything beneath it.
+# The region bootstrap creates the regional hosted zone
+# (<deployment_name>.<environment_domain>) in the RC account and delegates it
+# from the central environment zone. The RC Terraform only looks the zone up
+# and owns everything beneath it.
 # =============================================================================
 
 data "aws_route53_zone" "regional" {

@@ -4,6 +4,10 @@
 # Written into this (RC) account. Parameter name is deployment_name (Seaplane
 # config: us-east-1 or us-east-1-eph-<id>), not regional_id (eph-<id>-regional).
 #
+# The parameter stores a JSON object with the deployment's Function URL,
+# invoker role ARN, and metadata. Multiple deployments (including ephemeral)
+# coexist under the same /zoa/deployments/ prefix.
+#
 # The ZOA CLI reads /zoa/deployments/<deployment_name> from the central account
 # (primary + replica SSM regions). scripts/publish-zoa-discovery.sh copies this
 # parameter there with central credentials, so the RC pipeline never accesses

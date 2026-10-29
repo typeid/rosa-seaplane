@@ -14,18 +14,16 @@
 #   CODEBUILD_ROLE_ARN   - ARN of the CodeBuild role for all RC/MC projects
 #   CODEPIPELINE_ROLE_ARN - ARN of the shared cluster CodePipeline role
 #   PIPELINE_ARTIFACT_BUCKET - S3 bucket used by cluster CodePipelines
-#   CENTRAL_ACCOUNT_ID   - optional; defaults to the caller (central) account
 
 set -euo pipefail
 trap 'echo "FAILED: line $LINENO, exit code $?" >&2' ERR
 
 echo "Provisioning cluster CodeBuild and CodePipeline resources for ${ENVIRONMENT:-staging}"
 
-# CodeBuild/CodePipeline calls run in the pipeline account: the RC account
-# that hosts the region's RC and MC pipelines (see init_pipeline_account).
-# Match the conditional FIPS endpoint policy of the Terraform-managed pipelines
-# these calls replace. Other AWS calls keep the caller's (central) credentials
-# and their service-specific endpoint configuration.
+# CodeBuild/CodePipeline calls run in the region's RC account (see
+# init_pipeline_account); other AWS calls keep the caller's (central)
+# credentials. Match the conditional FIPS endpoint policy of the
+# Terraform-managed pipelines these calls replace.
 aws_cluster_pipeline() {
     local region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
     local use_fips=false
@@ -168,12 +166,6 @@ _CENTRAL_AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
 # Track which target accounts have had state buckets bootstrapped
 BOOTSTRAPPED_ACCOUNTS=""
 
-# Pipeline account credentials (empty keys: the caller is already in it)
-_PIPELINE_ACCOUNT_ID=""
-_PIPELINE_AWS_ACCESS_KEY_ID=""
-_PIPELINE_AWS_SECRET_ACCESS_KEY=""
-_PIPELINE_AWS_SESSION_TOKEN=""
-
 # Bootstrap state bucket in a target account (idempotent)
 bootstrap_target_state_bucket() {
     local target_account_id="$1"
@@ -229,6 +221,8 @@ init_pipeline_account() {
     [[ "$account_id" =~ ^[0-9]{12}$ ]] || { echo "ERROR: Invalid RC account in $rc_config" >&2; return 1; }
     [ "${_PIPELINE_ACCOUNT_ID:-}" = "$account_id" ] && return 0
 
+    # Empty credentials mean the caller is already in the RC account.
+    _PIPELINE_AWS_ACCESS_KEY_ID="" _PIPELINE_AWS_SECRET_ACCESS_KEY="" _PIPELINE_AWS_SESSION_TOKEN=""
     if [ "$(aws sts get-caller-identity --query Account --output text --no-cli-pager)" != "$account_id" ]; then
         creds=$(aws sts assume-role \
             --role-arn "arn:aws:iam::${account_id}:role/${role_name}" \
@@ -742,13 +736,11 @@ create_cluster_resource() {
         echo "ERROR: Missing CodeBuild service role ARN for $cluster_type cluster $CLUSTER_PROJECT_ID" >&2
         return 1
     fi
-    if [ "$cluster_type" = "regional" ]; then
-        init_central_state || return 1
-    fi
     if ! PLATFORM_IMAGE=$(jq -er '.platform_image // empty' "$config_path"); then
         echo "ERROR: platform_image is missing from $config_path" >&2
         return 1
     fi
+    # Sets CENTRAL_ACCOUNT_ID (the caller) used in the RC project environment.
     bootstrap_target_state_bucket "$TARGET_ACCOUNT_ID" "$AWS_REGION" || return 1
     init_pipeline_account "$config_path" || return 1
 
@@ -803,7 +795,7 @@ print_usage() {
     cat <<'EOF'
 Usage:
   provision-cluster-resources.sh
-  provision-cluster-resources.sh ensure-environment-zone --region-deployment REGION
+  provision-cluster-resources.sh ensure-environment-zone REGION_DEPLOYMENT
   provision-cluster-resources.sh create-rc --config PATH --region-deployment REGION
   provision-cluster-resources.sh delete-rc --config PATH
   provision-cluster-resources.sh create-mc --config PATH --region-deployment REGION
@@ -880,41 +872,12 @@ run_cluster_action() {
 
 ENVIRONMENT="${ENVIRONMENT:-${TARGET_ENVIRONMENT:-staging}}"
 
-ensure_environment_zone_action() {
-    local region_deployment="${REGION_DEPLOYMENT:-}"
-
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --region-deployment)
-                [ "$#" -ge 2 ] || { echo "ERROR: --region-deployment requires a value" >&2; return 2; }
-                region_deployment="$2"
-                shift 2
-                ;;
-            --environment)
-                [ "$#" -ge 2 ] || { echo "ERROR: --environment requires a value" >&2; return 2; }
-                ENVIRONMENT="$2"
-                shift 2
-                ;;
-            *)
-                echo "ERROR: Unknown option: $1" >&2
-                return 2
-                ;;
-        esac
-    done
-
-    [ -n "$region_deployment" ] || { echo "ERROR: --region-deployment is required" >&2; return 2; }
-    validate_environment || return 2
-    resolve_environment_hosted_zone "$region_deployment" || return 1
-    if [ -n "${ENVIRONMENT_HOSTED_ZONE_ID:-}" ]; then
-        echo "Environment zone ${ENVIRONMENT_DOMAIN}: ${ENVIRONMENT_HOSTED_ZONE_ID}"
-    fi
-}
-
 if [ "$#" -gt 0 ]; then
     case "$1" in
         ensure-environment-zone)
-            shift
-            ensure_environment_zone_action "$@"
+            [ "$#" -eq 2 ] || { print_usage >&2; exit 2; }
+            validate_environment || exit 2
+            resolve_environment_hosted_zone "$2"
             exit $?
             ;;
         create-rc|CreateRC|delete-rc|DeleteRC|create-mc|CreateMC|delete-mc|DeleteMC)

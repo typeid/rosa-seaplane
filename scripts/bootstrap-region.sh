@@ -337,7 +337,7 @@ STATE_BUCKET="terraform-state-${ACCOUNT_ID}"
 
 # The regional zone is delegated from the environment zone, so it must exist first.
 ENVIRONMENT="${TARGET_ENVIRONMENT}" "${REPO_ROOT}/scripts/provision-cluster-resources.sh" \
-    ensure-environment-zone --region-deployment "$REGION"
+    ensure-environment-zone "$REGION"
 
 echo ""
 
@@ -505,12 +505,10 @@ terraform init -reconfigure \
     -backend-config="key=${NAME_PREFIX:+${NAME_PREFIX}-}region-bootstrap-central/${REGIONAL_ID}.tfstate" \
     -backend-config="region=${REGION}" \
     -backend-config="use_lockfile=true"
-jq -n --arg region "$REGION" --arg deployment_name "$DEPLOYMENT_NAME" \
-    --arg environment_domain "$ENVIRONMENT_DOMAIN" --argjson regional_name_servers "$REGIONAL_NAME_SERVERS" \
-    '{region: $region, deployment_name: $deployment_name, regional_name_servers: $regional_name_servers,
-      environment_domain: (if $environment_domain == "" then null else $environment_domain end)}' \
-    > region-bootstrap-central.auto.tfvars.json
-terraform apply -auto-approve
+terraform apply -auto-approve \
+    -var="region=${REGION}" -var="deployment_name=${DEPLOYMENT_NAME}" \
+    ${ENVIRONMENT_DOMAIN:+-var="environment_domain=${ENVIRONMENT_DOMAIN}"} \
+    -var="regional_name_servers=${REGIONAL_NAME_SERVERS}"
 
 echo ""
 echo "==================================================="

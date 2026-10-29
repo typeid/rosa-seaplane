@@ -23,8 +23,8 @@ if [[ "${1:-}" == "--delete" ]]; then
 fi
 ENVIRONMENT="${1:?Usage: $0 [--delete] <environment> <region-deployment>}"
 REGION_DEPLOYMENT="${2:?Usage: $0 [--delete] <environment> <region-deployment>}"
-CENTRAL_REGIONS=$(printf '%s\n' "${ZOA_DEPLOYMENTS_PRIMARY_REGION:-us-east-1}" \
-    "${ZOA_DEPLOYMENTS_REPLICA_REGION:-eu-west-1}" | sort -u)
+# The ZOA CLI's primary and replica discovery regions.
+CENTRAL_REGIONS="us-east-1 eu-west-1"
 
 DEPLOY_DIR="deploy/${ENVIRONMENT}/${REGION_DEPLOYMENT}"
 RC_CONFIG="${DEPLOY_DIR}/pipeline-provisioner-inputs/regional-cluster.json"
